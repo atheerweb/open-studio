@@ -330,6 +330,25 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 .scm-file[aria-current="true"] :is(svg,.scm-directory,.scm-status) { color: inherit; }
 .scm-file:focus-visible, .scm-tree summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .scm-file svg { color: var(--accent); }
+.scm-row { display: flex; align-items: stretch; }
+.scm-row .scm-file { flex: 1; min-width: 0; }
+.scm-row .scm-stage { flex: 0 0 auto; align-self: center; margin-inline-end: 3px; }
+.scm-controls { display: grid; gap: 7px; padding: 8px 5px 12px; }
+.scm-controls label, .scm-controls small { color: var(--muted); }
+.scm-controls textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.scm-branch { display: flex; gap: 6px; align-items: center; overflow-wrap: anywhere; }
+.scm-branch svg { flex-shrink: 0; color: var(--accent); }
+.scm-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.scm-actions button { flex: 1 0 auto; }
 .scm-name, .scm-directory { overflow: hidden; text-overflow: ellipsis; }
 .scm-directory { color: var(--muted); font-size: 11px; }
 .scm-status { margin-inline-start: auto; color: var(--warning); font-family: var(--font-code); }

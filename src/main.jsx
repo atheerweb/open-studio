@@ -19,12 +19,30 @@ function gitFiles(result,group) {
   return group === 'untracked' ? result.untracked.map(path=>({path,status:'?'})) : result[group];
 }
 
-function GitChanges({result,selected,onSelect,onRefresh,busy}) {
+function GitChanges({result,selected,onSelect,onRefresh,onAction,message,setMessage,busy,live}) {
+  const canCommit = !busy && !!message.trim() && !!result?.staged?.length;
+  const canPush = !busy && !!result?.branch && result.hasRemote;
   return <>
     <div className="panel-label"><span>SOURCE CONTROL</span>
       <button className="icon" aria-label="Refresh Git changes" title="Refresh Git changes" onClick={onRefresh} disabled={busy}><RefreshCw size={15}/></button>
     </div>
-    {!result?.available ? <p className="scm-empty">{result?.reason || 'The imported folder is outside a Git working tree.'}</p>
+    {result?.available && live && <form className="scm-controls" onSubmit={event=>{
+      event.preventDefault();
+      if (canCommit) onAction('git-commit');
+    }}>
+      <span className="scm-branch" title={result.upstream || undefined}><GitBranch size={15}/>{result.branch || 'Detached HEAD'}</span>
+      <label htmlFor="git-message">Commit message</label>
+      <textarea id="git-message" rows={2} maxLength={8000} value={message} disabled={busy}
+        onChange={event=>setMessage(event.target.value)}/>
+      <button type="submit" className="primary" disabled={!canCommit}>Commit</button>
+      <div className="scm-actions">
+        <button type="button" className="quiet" disabled={!canPush} onClick={()=>onAction('git-push')}>Push</button>
+        <button type="button" className="quiet" disabled={!canCommit || !canPush}
+          onClick={()=>onAction('git-commit-and-push')}>Commit &amp; Push</button>
+      </div>
+      {!result.hasRemote && <small>No Git remote configured.</small>}
+    </form>}
+    {!result?.available ? <p className="scm-empty">{result?.reason || 'The open folder is outside a Git working tree.'}</p>
       : gitGroups.every(([group])=>!gitFiles(result,group).length) ? <p className="scm-empty">No Git changes.</p>
       : <div className="scm-tree">{gitGroups.map(([group,label])=>{
         const files = gitFiles(result,group);
@@ -33,13 +51,18 @@ function GitChanges({result,selected,onSelect,onRefresh,busy}) {
           <summary><ChevronRight size={14} aria-hidden="true"/><span>{label}</span><span className="scm-count">{files.length}</span></summary>
           {files.map(file=>{
             const slash = file.path.lastIndexOf('/');
-            return <button key={file.path} className="scm-file" disabled={busy} title={file.path}
+            const verb = group === 'staged' ? 'Unstage' : 'Stage';
+            return <div className="scm-row" key={file.path}><button className="scm-file" disabled={busy} title={file.path}
               aria-current={selected?.group === group && selected.path === file.path ? 'true' : undefined}
               onClick={()=>onSelect(group,file)}>
               <FileCode2 size={15} aria-hidden="true"/><span className="scm-name">{file.path.slice(slash+1)}</span>
               {slash >= 0 && <span className="scm-directory">{file.path.slice(0,slash)}</span>}
               <span className="scm-status" data-status={file.status} aria-label={gitStatusNames[file.status]}>{file.status === '?' ? 'U' : file.status}</span>
-            </button>;
+            </button>{live && <button type="button" className="icon scm-stage" disabled={busy} title={verb + ' ' + file.path}
+              aria-label={verb + ' ' + file.path}
+              onClick={()=>onAction(group === 'staged' ? 'git-unstage' : 'git-stage',{group,path:file.path})}>
+              {group === 'staged' ? <Minus size={15}/> : <Plus size={15}/>}
+            </button>}</div>;
           })}
         </details>;
       })}</div>}
@@ -49,7 +72,7 @@ function GitChanges({result,selected,onSelect,onRefresh,busy}) {
 function GitPatch({result,selected,content}) {
   if (!selected) return <div className="empty-source scm-welcome"><GitCompareArrows size={28} aria-hidden="true"/>
     <h2>Git Diff</h2><p>{!result?.available
-      ? result?.reason || 'The imported folder is outside a Git working tree.'
+      ? result?.reason || 'The open folder is outside a Git working tree.'
       : gitGroups.some(([group])=>gitFiles(result,group).length)
         ? 'Select a file in Source Control to view its changes.' : 'No Git changes.'}</p></div>;
   const label = gitGroups.find(([group])=>group === selected.group)[1];
@@ -190,16 +213,18 @@ function FileList({files, filter, active, onChoose, busy}) {
 }
 
 function EmptyPreview({onImport, workspace, onStart, busy}) {
+  const canPreview = workspace?.canPreview;
   return <div className="empty-preview">
     <div className="preview-intro">
-      <span className="preview-kicker"><i aria-hidden="true"/>{workspace ? 'PRIVATE DRAFT' : 'LOCAL WORKBENCH'}</span>
-      <h1>{workspace ? 'Your draft is ready to run' : 'Start with a Vue project'}</h1>
-      <p>{workspace ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
-        : 'Open a local project, preview your changes, and review the diff before publishing.'}</p>
-      <button className="primary" disabled={busy} onClick={workspace ? onStart : onImport}>
+      <span className="preview-kicker"><i aria-hidden="true"/>LOCAL WORKBENCH</span>
+      <h1>{workspace ? (canPreview ? 'Your project is ready to run' : workspace.name) : 'Open a project folder'}</h1>
+      <p>{workspace ? (canPreview ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
+        : 'Open Source Control to review and commit changes. Live preview is available for Vue projects that use Vite.')
+        : 'Edit and preview your Vue project locally, then review, commit, and push with Source Control.'}</p>
+      {(!workspace || canPreview) && <button className="primary" disabled={busy} onClick={workspace ? onStart : onImport}>
         {workspace ? <Play size={16} aria-hidden="true"/> : <FolderOpen size={17} aria-hidden="true"/>}
-        {workspace ? 'Start preview' : 'Import Vue project'} <ArrowRight size={16} aria-hidden="true"/>
-      </button>
+        {workspace ? 'Start preview' : 'Open Folder'} <ArrowRight size={16} aria-hidden="true"/>
+      </button>}
     </div>
     <svg className="preview-mark" viewBox="0 0 348 274" fill="none" aria-hidden="true">
       <defs>
@@ -276,6 +301,7 @@ function App() {
   const [gitDiff,setGitDiff] = useState(null);
   const [gitFile,setGitFile] = useState(null);
   const [gitContent,setGitContent] = useState(null);
+  const [commitMessage,setCommitMessage] = useState('');
   const [resolution,setResolution] = useState(null);
   const [previewChecked,setPreviewChecked] = useState(false);
   const [tab,setTab] = useState('Preview');
@@ -445,16 +471,16 @@ function App() {
   function importProject(event) {
     event.preventDefault();
     if (!folder) return;
-    perform('Importing frontend…',async () => {
-      setWorkspace((await api('import',{folder})).workspace);
+    perform('Opening folder…',async () => {
+      setWorkspace((await api('open',{folder})).workspace);
       setTab('Preview');
       setFolder('');
       setImportOpen(false);
-      setNotice({text:'Private draft created.'});
+      setNotice({text:'Project opened.'});
     });
   }
   function start() {
-    if (!confirm('Run npm run dev for this trusted project from the private draft?')) return;
+    if (!confirm('Run npm run dev in this trusted project?')) return;
     perform('Starting Vite preview…',async () => {
       try {
         setWorkspace((await api('start',{port:Number(port),approved:true})).workspace);
@@ -467,12 +493,12 @@ function App() {
     });
   }
   function close() {
-    if (dirty && !confirm('Close the draft and discard the unsaved text in this editor?')) return;
-    perform('Closing draft…',async () => {
+    if (dirty && !confirm('Close the folder and discard the unsaved text in this editor?')) return;
+    perform('Closing folder…',async () => {
       await api('close');
       setWorkspace(null); setRoute(null); setPageFile(null); setManualRoute(null);
       setResolving(false); setSelection(null); setPicking(false); setReview(null); setGitDiff(null); setResolution(null);
-      setGitFile(null); setGitContent(null); setSidebar('explorer');
+      setGitFile(null); setGitContent(null); setCommitMessage(''); setSidebar('explorer');
       setPreviewChecked(false); setConsent(false); setSessionPrompts({}); setTab('Preview');
       openFile(null);
     });
@@ -487,16 +513,16 @@ function App() {
     });
   }
   function save(text) {
-    perform('Saving draft…',async () => {
+    perform('Saving source…',async () => {
       openFile(await api('write',{file:file.file,hash:file.hash,text}));
-      setNotice({text:'Saved to draft.'});
+      setNotice({text:'File saved.'});
     });
   }
   function formatSource() {
     perform('Formatting source…',async () => {
       const result = await api('format-source',{file:file.file,text:editor});
       setEditor(result.text);
-      setNotice({text:result.text === editor ? 'Source is already formatted.' : 'Source formatted. Save to apply it to the draft.'});
+      setNotice({text:result.text === editor ? 'Source is already formatted.' : 'Source formatted. Save to apply the formatting.'});
     });
   }
   async function loadModels() {
@@ -539,7 +565,7 @@ function App() {
     setPreviewChecked(false);
   }
   function decide(approved) {
-    perform('Updating draft…',async () => {
+    perform('Applying edits…',async () => {
       await api('agent-approval',{id:workspace.pendingEdit.id,approved});
       await refreshDraft();
     });
@@ -567,22 +593,10 @@ function App() {
     if (!workspace || !['Diff','Publish'].includes(name)) return setTab(name);
     if (name === 'Diff') {
       return perform('Loading Git changes…',async () => {
-        const result = await api('git-diff');
-        const changes = gitGroups.flatMap(([group])=>gitFiles(result,group).map(change=>({...change,group})));
-        const selection = changes.find(change=>change.group === gitFile?.group && change.path === gitFile.path)
-          || changes.find(change=>change.path === file?.file && change.group === 'unstaged')
-          || changes.find(change=>change.path === file?.file)
-          || changes[0] || null;
-        setGitDiff(result);
-        setGitContent(null);
-        setGitFile(null);
         setSidebar('git');
         setExplorerOpen(true);
         setTab(name);
-        if (selection) {
-          setGitContent(await api('git-file',selection));
-          setGitFile(selection);
-        }
+        await refreshGit();
       });
     }
     perform('Loading draft review…',async () => {
@@ -590,6 +604,42 @@ function App() {
       setResolution(null);
       setPreviewChecked(false);
       setTab(name);
+    });
+  }
+  async function refreshGit() {
+    const result = await api('git-diff');
+    const changes = gitGroups.flatMap(([group])=>gitFiles(result,group).map(change=>({...change,group})));
+    const selection = changes.find(change=>change.group === gitFile?.group && change.path === gitFile.path)
+      || changes.find(change=>change.path === gitFile?.path)
+      || changes.find(change=>change.path === file?.file && change.group === 'unstaged')
+      || changes.find(change=>change.path === file?.file)
+      || changes[0] || null;
+    setGitDiff(result);
+    setGitContent(null);
+    setGitFile(selection);
+    if (selection) setGitContent(await api('git-file',selection));
+  }
+  function gitAction(action,values = {}) {
+    const combined = action === 'git-commit-and-push';
+    const labels = {'git-stage':'Staging file','git-unstage':'Unstaging file','git-commit':'Committing',
+      'git-push':'Pushing','git-commit-and-push':'Committing and pushing'};
+    perform(labels[action] + '…',async () => {
+      try {
+        if (combined || action === 'git-commit') {
+          await api('git-commit',{message:commitMessage});
+          setCommitMessage('');
+          if (combined) {
+            try { await api('git-push'); }
+            catch (error) { throw new Error('Commit created. Push failed. ' + error.message); }
+          }
+          setNotice({text:combined ? 'Commit pushed.' : 'Commit created.'});
+        } else {
+          await api(action,values);
+          if (action === 'git-push') setNotice({text:'Branch pushed.'});
+        }
+      } finally {
+        await refreshGit();
+      }
     });
   }
   function openGitFile(group,file) {
@@ -619,7 +669,7 @@ function App() {
     });
   }
   const views = [['Preview',Globe2],['Source',Code2],['Diff',GitCompareArrows]];
-  if (workspace) views.push(['Publish',ArrowUpRight]);
+  if (workspace && !workspace.live) views.push(['Publish',ArrowUpRight]);
   return <>
     <header className="topbar">
       <div className="brand">
@@ -658,14 +708,15 @@ function App() {
       </nav>
       <aside id="workspace-sidebar" className="explorer" aria-label={sidebar === 'git' ? 'Source Control' : 'Project explorer'}
         inert={!explorerOpen} aria-hidden={!explorerOpen}>
-        {sidebar === 'git' ? <GitChanges result={gitDiff} selected={gitFile} onSelect={openGitFile} onRefresh={()=>view('Diff')} busy={!!busy}/> : <>
+        {sidebar === 'git' ? <GitChanges result={gitDiff} selected={gitFile} onSelect={openGitFile} onRefresh={()=>view('Diff')}
+          onAction={gitAction} message={commitMessage} setMessage={setCommitMessage} busy={!!busy} live={workspace?.live}/> : <>
         <div className="panel-label"><span>EXPLORER</span><FolderOpen size={15} aria-hidden="true"/></div>
-        <div className="project"><FolderOpen size={15} aria-hidden="true"/><strong title={workspace?.name}>{workspace?.name || 'No folder imported'}</strong></div>
+        <div className="project"><FolderOpen size={15} aria-hidden="true"/><strong title={workspace?.name}>{workspace?.name || 'No folder open'}</strong></div>
         {workspace ? <>
           <label className="search"><Search size={15}/><input aria-label="Filter source files" placeholder="Filter files…" value={filter} onChange={e=>setFilter(e.target.value)}/></label>
           <FileList files={workspace.files} filter={filter} active={file?.file} onChoose={choose} busy={!!busy}/>
-          <button className="quiet explorer-action" onClick={close} disabled={!!busy}><Square size={14}/> Close draft</button>
-        </> : <button className="quiet explorer-action" onClick={()=>setImportOpen(true)}><FolderOpen size={16}/> Import folder</button>}
+          <button className="quiet explorer-action" onClick={close} disabled={!!busy}><Square size={14}/> Close folder</button>
+        </> : <button className="quiet explorer-action" onClick={()=>setImportOpen(true)}><FolderOpen size={16}/> Open Folder</button>}
         <div className="explorer-foot"><Terminal size={15}/><button className="text-button" onClick={()=>setLogOpen(!logOpen)}>Runtime log</button></div>
         </>}
       </aside>
@@ -692,7 +743,7 @@ function App() {
                   {picking ? 'Cancel selection' : selectedElement ? 'Pick again' : 'Select element'}
                 </button></div>
               <div className="preview-frame">
-                <iframe ref={preview} title="Vue draft preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
+                <iframe ref={preview} title="Vue project preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
                 <div className="picker-guide" id="picker-guide" aria-hidden={!picking}>
                   <MousePointer2 size={17} aria-hidden="true"/>
                   <span><strong>Pick an element</strong><small>Click or tap, or press Tab then Enter.</small></span>
@@ -706,25 +757,25 @@ function App() {
               <div className="source-head">
                 <FileCode2 size={16} aria-hidden="true"/>
                 <span className="source-path" title={file.file}>{file.file}</span>
-                <small className={dirty ? 'source-state dirty' : 'source-state'}>{dirty ? 'Unsaved' : 'Draft'}</small>
+                <small className={dirty ? 'source-state dirty' : 'source-state'}>{dirty ? 'Unsaved' : 'Saved'}</small>
               </div>
               <Suspense fallback={<div className="source-editor" role="status">Loading editor…</div>}>
                 <SourceEditor key={file.file} value={editor} onChange={setEditor} disabled={!!busy}/>
               </Suspense>
               <div className="source-actions">
-                <button className="primary" disabled={!dirty || !!busy || !!workspace?.pendingEdit} onClick={()=>save(editor)}><Check size={16}/>Save draft</button>
+                <button className="primary" disabled={!dirty || !!busy || !!workspace?.pendingEdit} onClick={()=>save(editor)}><Check size={16}/>Save file</button>
                 <button className="quiet" disabled={!!busy} onClick={formatSource}>Format source</button>
                 <button className="quiet" disabled={dirty || !!busy || !workspace?.canUndoAgent || !!workspace?.pendingEdit}
                   onClick={()=>perform('Undoing agent edit…',async () => {
                     await api('agent-undo'); await refreshDraft();
                   })}><Undo2 size={16}/>Undo agent edit</button>
-                <button className="quiet" disabled={(!dirty && file.text === file.original) || !!busy || !!workspace?.pendingEdit} onClick={()=>save(file.original)}>Restore imported</button>
+                {!workspace?.live && <button className="quiet" disabled={(!dirty && file.text === file.original) || !!busy || !!workspace?.pendingEdit} onClick={()=>save(file.original)}>Restore imported</button>}
               </div>
             </> : <div className="empty-source"><Code2 size={28}/><h2>No file selected</h2><p>Open a preview page or select a Vue file in Explorer.</p></div>}
           </div>}
           {tab === 'Diff' && <div className="source-box">
             {workspace ? <GitPatch result={gitDiff} selected={gitFile} content={gitContent}/>
-              : <div className="empty-source"><GitCompareArrows size={28}/><h2>Git Diff</h2><p>Import a project to see its Git changes.</p></div>}
+              : <div className="empty-source"><GitCompareArrows size={28}/><h2>Git Diff</h2><p>Open a project to see its Git changes.</p></div>}
           </div>}
           {tab === 'Publish' && <div className="source-box">
             <div className="source-head"><GitCompareArrows size={16}/><span>Changes to publish</span></div>
@@ -766,7 +817,7 @@ function App() {
           ? 'Copying dependencies (' + previewProgress.copied + '/' + previewProgress.total + ')'
           : workspace?.agentActivity || busy || notice?.text || (picking ? 'Element picker active' :
             elementName ? 'Element attached to Agent Chat' : workspace?.dependencyFallback || (ready ? 'Preview running' : 'Ready'))}</span>
-          <span className="status-mode"><ShieldCheck size={13} aria-hidden="true"/>{workspace ? 'Private draft' : 'Local workspace'}</span></div>
+          <span className="status-mode"><ShieldCheck size={13} aria-hidden="true"/>{workspace?.live ? 'Working tree' : workspace ? 'Private draft' : 'Local workspace'}</span></div>
       </section>
       <aside id="agent-chat" className="agent" aria-label="Codex page chat"
         inert={!agentOpen} aria-hidden={!agentOpen}>
@@ -794,7 +845,7 @@ function App() {
           onScroll={event=>{const log = event.currentTarget; followChat.current = log.scrollHeight - log.scrollTop - log.clientHeight < 48;}}>
           {!messages.length && !activity && <div className="chat-empty">
             <div className="chat-avatar"><Sparkles size={17} aria-hidden="true"/></div>
-            <section><h2>What would you like to change?</h2><p>Describe an edit and review the result in your private draft.</p></section>
+            <section><h2>What would you like to change?</h2><p>Describe an edit and review the changes in your project.</p></section>
           </div>}
           {messages.map((message,index)=><article className={'message '+(message.author === 'You' ? 'user' : '')}
             key={JSON.stringify([index,message.author,message.route,message.text])}>
@@ -817,7 +868,7 @@ function App() {
           {activity && <AgentActivity status={activity} steps={workspace?.agentSteps || []}/>}
           {pending && <section className="message agent-question approval-card" aria-label="Edit approval">
             <h3><ShieldCheck size={16} aria-hidden="true"/> Approve proposed edits?</h3>
-            <p>Review the files Codex wants to edit in the draft.</p>
+            <p>Review the files Codex wants to edit.</p>
             <ul>{pending.files.map(path => {
               const impact = pending.impacts.find(item => item.file === path);
               return <li key={path}><strong>{path}</strong>
@@ -847,7 +898,7 @@ function App() {
                 {(selectedModel?.efforts || ['low','medium','high','xhigh']).map(effort=><option key={effort} value={effort}>{effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)}</option>)}
               </Select></label>
               <label className="agent-settings-approvals">Ask before editing<Select value={editApproval} disabled={!!busy} onChange={event=>setEditApproval(event.target.value)}>
-                <option value="shared">Shared components</option><option value="all">Every draft edit</option>
+                <option value="shared">Shared components</option><option value="all">Every edit</option>
               </Select></label>
               <div className="agent-model-status" role="status">
                 {modelStatus === 'loading' && <p>Loading models…</p>}
@@ -865,14 +916,14 @@ function App() {
               <button className="send" type="submit" aria-label="Send to Codex" disabled={!!composerHint || !prompt.trim()}><ArrowUp size={19}/></button>
             </div>
           </div>
-          <label className="consent"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> Share draft context and messages with Codex.</label>
+          <label className="consent"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> Share project context and messages with Codex.</label>
         </form>
       </aside>
     </main>
     <dialog ref={dialog} onCancel={event=>busy ? event.preventDefault() : setImportOpen(false)}>
       <form onSubmit={importProject}>
-        <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close import dialog" onClick={()=>setImportOpen(false)} disabled={!!busy}><X size={19}/></button></div>
-        <h2>Import a Vue project</h2><p>Choose the local frontend folder that contains package.json and installed dependencies.</p>
+        <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close folder dialog" onClick={()=>setImportOpen(false)} disabled={!!busy}><X size={19}/></button></div>
+        <h2>Open a project folder</h2><p>Choose the original local project folder. Vue preview requires a Vite project with installed dependencies.</p>
         <label htmlFor="folder">Frontend folder</label>
         <button id="folder" className="quiet" type="button" autoFocus aria-describedby="selected-folder" onClick={browseForFolder} disabled={!!busy}>
           <FolderOpen size={16}/>{busy === 'Choosing folder…' ? busy : 'Choose folder'}
@@ -880,7 +931,7 @@ function App() {
         <output id="selected-folder" className="selected-folder" aria-live="polite">{folder || 'No folder selected'}</output>
         <label htmlFor="port">Preview port</label><input id="port" type="number" min="1024" max="65535" required value={port} onChange={e=>setPort(e.target.value)} disabled={!!busy}/>
         {notice?.error && <p className="form-error" role="alert">{notice.text}</p>}
-        <button className="primary" disabled={!!busy || !folder}><FolderOpen size={16}/>{busy === 'Importing frontend…' ? busy : 'Create private draft'}</button>
+        <button className="primary" disabled={!!busy || !folder}><FolderOpen size={16}/>{busy === 'Opening folder…' ? busy : 'Open Folder'}</button>
       </form>
     </dialog>
   </>;
