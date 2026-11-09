@@ -530,7 +530,19 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 @supports (appearance: base-select) and selector(::picker(select)) {
   .studio-select,
   .studio-select::picker(select) { appearance: base-select; }
-  .studio-select > button { display: contents; }
+  .studio-select > button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+  }
   .studio-select-label {
     display: block;
     min-width: 0;
@@ -546,7 +558,7 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
     margin-inline-start: auto;
     transition: rotate 180ms ease;
   }
-  .studio-select { align-items: center; gap: 8px; }
+  .studio-select { align-items: center; }
   .studio-select:open { border-color: var(--accent); }
   .studio-select:open .studio-select-chevron { rotate: 180deg; }
   .studio-select::picker(select) {
