@@ -64,11 +64,18 @@ export async function changeGitWorkspace(source,{action,group,path,message}) {
     }
     return;
   }
-  if (action === 'git-commit') {
+  if (action === 'git-commit' || action === 'git-commit-and-push') {
     if (typeof message !== 'string' || !message.trim() || message.includes('\0') || message.length > 8000) {
       throw fail('Enter a commit message between 1 and 8,000 characters.');
     }
     await git(root,'commit','-m',message.trim());
+    if (action === 'git-commit-and-push') {
+      try {
+        await changeGitWorkspace(root,{action:'git-push'});
+      } catch (error) {
+        throw Object.assign(fail('Commit created. Push failed. ' + error.message,422),{committed:true});
+      }
+    }
     return;
   }
   const unstage = action === 'git-unstage';

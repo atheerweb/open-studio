@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createStudio } from '../server/studio.mjs';
+import { LiveWorkspace } from '../server/live-workspace.mjs';
 
 test('opens the working tree, stages selected changes, commits and pushes the current branch', async () => {
   const root = await mkdtemp(join(tmpdir(),'open-studio-live-'));
@@ -48,11 +50,54 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
     assert.equal(git(source,'status','--short'),'?? package.json');
     await call('git-push');
     assert.equal(git(remote,'rev-parse','refs/heads/main'),git(source,'rev-parse','HEAD'));
+    await call('git-stage',{group:'untracked',path:'package.json'});
+    await call('git-commit-and-push',{message:'Add package metadata'});
+    assert.equal(git(remote,'rev-parse','refs/heads/main'),git(source,'rev-parse','HEAD'));
+    git(source,'remote','set-url','origin',join(root,'missing.git'));
+    await writeFile(join(source,file),'<template>After failed push</template>');
+    await call('git-stage',{group:'unstaged',path:file});
+    const failed = await call('git-commit-and-push',{message:'Keep local commit'},422);
+    assert.equal(failed.committed,true);
+    assert.match(failed.error,/Commit created\. Push failed/);
+    assert.equal(git(source,'log','-1','--format=%s'),'Keep local commit');
     await call('close');
-    assert.match(await readFile(join(source,file),'utf8'),/Accepted/);
+    assert.match(await readFile(join(source,file),'utf8'),/After failed push/);
   } finally {
     await app.closeWorkspace();
     if (app.listening) await new Promise(resolve=>app.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('live preview loads the project Vite config without writing a bridge into the project', async () => {
+  const root = await mkdtemp(join(tmpdir(),'open-studio-live-preview-'));
+  let workspace;
+  try {
+    await mkdir(join(root,'node_modules'));
+    await symlink(await realpath('node_modules/vite'),join(root,'node_modules','vite'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(join(root,'package.json'),JSON.stringify({dependencies:{vue:'fixture'},
+      scripts:{dev:'node node_modules/vite/bin/vite.js'}}));
+    const html = '<html><head></head><body>Original</body></html>';
+    await writeFile(join(root,'index.html'),html);
+    await writeFile(join(root,'vite.config.mjs'),`export default {plugins:[{
+      name:'fixture',transformIndexHtml(html) { return html.replace('Original','Configured'); }
+    }]};`);
+    const files = await readdir(root);
+    const portCheck = createServer();
+    await new Promise((resolve,reject)=>portCheck.once('error',reject).listen(0,'localhost',resolve));
+    const port = portCheck.address().port;
+    await new Promise(resolve=>portCheck.close(resolve));
+    workspace = await LiveWorkspace.open(root);
+    await workspace.installBridge('http://localhost:4320');
+    await workspace.start(port).catch(error => { throw new Error(error.message + '\n' + workspace.logs); });
+    const page = await (await fetch(workspace.url)).text();
+    assert.match(page,/Configured/);
+    assert.match(page,/studio-vue-hello/);
+    assert.equal(await readFile(join(root,'index.html'),'utf8'),html);
+    assert.deepEqual(await readdir(root),files);
+  } finally {
+    await workspace?.close();
     await rm(root,{recursive:true,force:true});
   }
 });

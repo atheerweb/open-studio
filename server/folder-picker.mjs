@@ -8,7 +8,7 @@ Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $dialog = [Windows.Forms.FolderBrowserDialog]::new()
 try {
-  $dialog.Description = 'Choose the Vue frontend folder'
+  $dialog.Description = 'Choose a local project folder'
   $dialog.ShowNewFolderButton = $false
   if ($dialog.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) {
     [Console]::Write($dialog.SelectedPath)
@@ -26,9 +26,9 @@ export async function chooseFrontendFolder() {
   const mac = process.platform === 'darwin';
   const command = mac ? 'osascript' : 'zenity';
   const args = mac
-    ? ['-e','try','-e','POSIX path of (choose folder with prompt "Choose the Vue frontend folder")',
+    ? ['-e','try','-e','POSIX path of (choose folder with prompt "Choose a local project folder")',
       '-e','on error number -128','-e','return ""','-e','end try']
-    : ['--file-selection','--directory','--title=Choose the Vue frontend folder'];
+    : ['--file-selection','--directory','--title=Choose a local project folder'];
   try {
     const {stdout} = await run(command,args);
     return stdout.replace(/\n$/,'') || null;

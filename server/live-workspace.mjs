@@ -54,7 +54,7 @@ export class LiveWorkspace extends VueDraft {
     } catch {
       throw new Error('Install the project dependencies before starting the preview.');
     }
-    this.previewDirectory = await mkdtemp(join(await realpath(tmpdir()),'open-studio-preview-'));
+    this.previewDirectory ??= await mkdtemp(join(await realpath(tmpdir()),'open-studio-preview-'));
     const config = join(this.previewDirectory,'vite.config.mjs');
     await writeFile(config,`
 const viteUrl = ${JSON.stringify(vite)};

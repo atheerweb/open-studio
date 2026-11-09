@@ -104,7 +104,7 @@ async function api(action, values = {}) {
     body:JSON.stringify({action,...values})
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'The workspace request failed.');
+  if (!response.ok) throw Object.assign(new Error(result.error || 'The workspace request failed.'),{committed:result.committed});
   return result;
 }
 
@@ -583,13 +583,6 @@ function App() {
   }
   function view(name) {
     if (picking && name !== 'Preview') togglePicker(false);
-    if (name === 'Source') {
-      setSidebar('explorer');
-      setTab(name);
-      const defaultFile = pageFile || workspace?.files[0];
-      if (!file && defaultFile) choose(defaultFile);
-      return;
-    }
     if (!workspace || !['Diff','Publish'].includes(name)) return setTab(name);
     if (name === 'Diff') {
       return perform('Loading Git changes…',async () => {
@@ -626,20 +619,19 @@ function App() {
     perform(labels[action] + '…',async () => {
       try {
         if (combined || action === 'git-commit') {
-          await api('git-commit',{message:commitMessage});
+          await api(action,{message:commitMessage});
           setCommitMessage('');
-          if (combined) {
-            try { await api('git-push'); }
-            catch (error) { throw new Error('Commit created. Push failed. ' + error.message); }
-          }
           setNotice({text:combined ? 'Commit pushed.' : 'Commit created.'});
         } else {
           await api(action,values);
           if (action === 'git-push') setNotice({text:'Branch pushed.'});
         }
-      } finally {
-        await refreshGit();
+      } catch (error) {
+        if (error.committed) setCommitMessage('');
+        await refreshGit().catch(() => {});
+        throw error;
       }
+      await refreshGit();
     });
   }
   function openGitFile(group,file) {
@@ -668,7 +660,7 @@ function App() {
       }
     });
   }
-  const views = [['Preview',Globe2],['Source',Code2],['Diff',GitCompareArrows]];
+  const views = [['Preview',Globe2]];
   if (workspace && !workspace.live) views.push(['Publish',ArrowUpRight]);
   return <>
     <header className="topbar">

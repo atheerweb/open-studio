@@ -225,6 +225,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'git-stage':
           case 'git-unstage':
           case 'git-commit':
+          case 'git-commit-and-push':
           case 'git-push':
             if (!draft.live) throw error(409,'Open the original project before running Git actions.');
             await changeGitWorkspace(draft.source,input);
@@ -249,7 +250,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       }
       return send(200,{workspace:summary()});
     } catch (failure) {
-      return send(failure.status || 422,{error:failure.message});
+      return send(failure.status || 422,{error:failure.message,...(failure.committed && {committed:true})});
     } finally {
       if (ownsLock) busy = false;
     }
