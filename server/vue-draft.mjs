@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
-import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { routeFiles, routeBridge, matchPage } from './vue-page.mjs';
+import { atomicWrite, bridgeFile, bridgeTag, fingerprint, projectFolders as folders, recordBaseline,
+  rootFile, reviewDraft, publishDraft, resolveDraftConflict, safeFile } from './draft-publish.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
-const rootFile = /^(package(-lock)?\.json|index\.html|vite\.config\.[cm]?[jt]s|[jt]sconfig[^\\/]*\.json|postcss\.config\.[cm]?[jt]s|tailwind\.config\.[cm]?[jt]s|\.env(?:\.[a-z0-9_-]+)*)$/i;
-const folders = new Set(['src','public','node_modules']);
 const windows = process.platform === 'win32';
 
 const copyOptions = {
@@ -21,14 +21,17 @@ const copyOptions = {
   }
 };
 
-async function copyDependencies(from, to) {
+async function copyDependencies(from, to, progress) {
   await mkdir(to);
   const packages = await readdir(from);
   let next = 0;
+  let copied = 0;
+  progress(copied,packages.length);
   const workers = Array.from({length:12}, async () => {
     while (next < packages.length) {
       const name = packages[next++];
       await cp(join(from,name), join(to,name), copyOptions);
+      progress(++copied,packages.length);
     }
   });
   const results = await Promise.allSettled(workers);
@@ -37,7 +40,7 @@ async function copyDependencies(from, to) {
 }
 
 export class VueDraft {
-  static async open(folder) {
+  static async open(folder, store) {
     if (typeof folder !== 'string' || !isAbsolute(folder) || folder.startsWith('\\\\')) throw new Error('Enter an absolute local frontend folder.');
     const source = await realpath(folder);
     if (source === dirname(source)) throw new Error('Select a frontend folder, not a drive root.');
@@ -47,46 +50,107 @@ export class VueDraft {
     if (!(manifest.dependencies?.vue || manifest.devDependencies?.vue) || typeof manifest.scripts?.dev !== 'string' || !/\bvite\b/.test(manifest.scripts.dev)) {
       throw new Error('This build supports Vue frontends with a Vite npm run dev script.');
     }
-    const directory = await mkdtemp(join(await realpath(tmpdir()), 'open-studio-vue-'));
-    const draft = new VueDraft(directory);
+    if (store) await mkdir(store,{recursive:true});
+    const project = store && join(await realpath(store),fingerprint(windows ? source.toLowerCase() : source));
+    const metadata = project && join(project,'state.json');
+    const saved = metadata && await readFile(metadata,'utf8').then(JSON.parse).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    });
+    if (project) await mkdir(project,{recursive:true});
+    const directory = saved?.directory || await mkdtemp(join(project || await realpath(tmpdir()), 'open-studio-vue-'));
+    const draft = new VueDraft(directory,source);
+    if (saved && (dirname(directory) !== project || !basename(directory).startsWith('open-studio-vue-'))) {
+      throw new Error('Invalid saved draft directory.');
+    }
     try {
-      for (const entry of await readdir(source, {withFileTypes:true})) {
+      for (const entry of saved ? [] : await readdir(source, {withFileTypes:true})) {
         if (!(entry.isDirectory() && folders.has(entry.name)) && !(entry.isFile() && rootFile.test(entry.name))) continue;
         const from = join(source, entry.name);
         const to = join(directory, entry.name);
-        if (entry.name === 'node_modules') await copyDependencies(from,to);
-        else await cp(from,to,copyOptions);
+        await cp(from,to,copyOptions);
       }
       draft.name = basename(source);
-      const entries = await readdir(join(directory, 'src'), {recursive:true, withFileTypes:true});
-      for (const file of entries) {
-        if (!file.isFile() || !file.name.endsWith('.vue')) continue;
-        const path = join(file.parentPath, file.name);
-        const key = path.slice(directory.length + 1).split(/[\\/]/).join('/');
-        const info = await lstat(path);
-        if (info.size <= 524288) draft.baselines.set(key, await readFile(path, 'utf8'));
-      }
-      for (const entry of entries) {
-        if (!entry.isFile() || !/\.[cm]?[jt]s$/.test(entry.name)) continue;
-        const path = join(entry.parentPath, entry.name);
-        const key = path.slice(directory.length + 1).split(/[\\/]/).join('/');
-        if (!/(?:^|\/)router(?:\/|\.)/.test(key) || (await lstat(path)).size > 524288) continue;
-        draft.routes.push(...routeFiles(key, await readFile(path,'utf8'), draft.baselines));
-      }
+      draft.projectBaseline = saved?.baseline || await recordBaseline(directory);
+      draft.bridgeOrigin = saved?.bridgeOrigin;
+      draft.threadId = saved?.threadId;
+      draft.messages = saved?.messages || [];
+      draft.pendingEdit = saved?.pendingEdit;
+      draft.lastDecision = saved?.lastDecision;
+      draft.lastAgentEdits = saved?.lastAgentEdits;
+      draft.dependenciesReady = Boolean(saved && await lstat(join(directory,'node_modules','vite','bin','vite.js')).catch(() => null));
+      await draft.refreshFiles();
+      if (!saved && metadata) await draft.saveState(metadata);
+      draft.metadata = metadata;
       return draft;
     } catch (error) {
-      await draft.close();
+      if (!saved) await rm(directory,{recursive:true,force:true});
       throw error;
     }
   }
 
-  constructor(directory) {
+  async refreshFiles() {
+    const {directory} = this;
+    const entries = await readdir(join(directory, 'src'), {recursive:true, withFileTypes:true}).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return [];
+    });
+    const previous = this.baselines;
+    this.baselines = new Map();
+    this.routes = [];
+    for (const file of entries) {
+      if (!file.isFile() || !file.name.endsWith('.vue')) continue;
+      const path = join(file.parentPath, file.name);
+      const key = path.slice(directory.length + 1).split(/[\\/]/).join('/');
+      const info = await lstat(path);
+      if (info.size > 524288) continue;
+      const sourceText = await readFile(await safeFile(this.source,key),'utf8').catch(error => {
+        if (error.code !== 'ENOENT') throw error;
+        return '';
+      });
+      this.baselines.set(key, previous.get(key) ?? sourceText);
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.[cm]?[jt]s$/.test(entry.name)) continue;
+      const path = join(entry.parentPath, entry.name);
+      const key = path.slice(directory.length + 1).split(/[\\/]/).join('/');
+      if (!/(?:^|\/)router(?:\/|\.)/.test(key) || (await lstat(path)).size > 524288) continue;
+      this.routes.push(...routeFiles(key, await readFile(path,'utf8'), this.baselines));
+    }
+    if (!this.routes.length && this.baselines.has('src/App.vue')) {
+      this.routes.push({route:'/',file:'src/App.vue'});
+    }
+  }
+
+  async saveState(metadata = this.metadata, baseline = this.projectBaseline) {
+    if (!metadata) return;
+    await atomicWrite(metadata,JSON.stringify({directory:this.directory,baseline,
+      bridgeOrigin:this.bridgeOrigin,threadId:this.threadId,messages:this.messages,
+      pendingEdit:this.pendingEdit,lastDecision:this.lastDecision,lastAgentEdits:this.lastAgentEdits}));
+  }
+
+  async updateBaseline(baseline) {
+    await this.saveState(this.metadata,baseline);
+    this.projectBaseline = baseline;
+  }
+
+  review() { return reviewDraft(this); }
+  async publish(token) {
+    await publishDraft(this,token);
+    this.baselines.clear();
+    await this.refreshFiles();
+  }
+  resolveConflict(file,expectedHash,merged,keepOriginal) { return resolveDraftConflict(this,file,expectedHash,merged,keepOriginal); }
+
+  constructor(directory,source) {
     this.directory = directory;
+    this.source = source;
     this.baselines = new Map();
     this.routes = [];
     this.logs = '';
     this.state = 'imported';
     this.writePending = false;
+    this.messages = [];
   }
 
   get files() {
@@ -98,17 +162,23 @@ export class VueDraft {
   }
 
   async installBridge(origin) {
-    if (this.bridgeOrigin === origin) return;
     const entry = join(this.directory, 'index.html');
     const html = await readFile(entry, 'utf8');
     if (!/<\/head\s*>/i.test(html)) throw new Error('The preview index.html needs a closing head tag.');
-    const script = join(this.directory, 'public', '__open_studio_route__.js');
+    const script = join(this.directory, bridgeFile);
     await mkdir(dirname(script), {recursive:true});
+    if (this.bridgeOrigin && html.includes(bridgeTag)) {
+      await atomicWrite(script,routeBridge(origin));
+      this.bridgeOrigin = origin;
+      await this.saveState();
+      return;
+    }
     await writeFile(script, routeBridge(origin), {flag:'wx'});
     try {
       await writeFile(entry, html.replace(/<\/head\s*>/i,
-        '<script defer src="/__open_studio_route__.js"></script>\n$&'));
+        bridgeTag + '$&'));
       this.bridgeOrigin = origin;
+      await this.saveState();
     } catch (error) {
       await rm(script, {force:true});
       throw error;
@@ -117,12 +187,7 @@ export class VueDraft {
 
   async pathFor(file) {
     if (!this.baselines.has(file)) throw new Error('Unknown Vue source file.');
-    const candidate = join(this.directory, ...file.split('/'));
-    const actual = await realpath(candidate);
-    if (resolve(actual).toLowerCase() !== resolve(candidate).toLowerCase() || !(await lstat(candidate)).isFile()) {
-      throw new Error('The draft file is no longer a regular source file.');
-    }
-    return candidate;
+    return safeFile(this.directory,file);
   }
 
   async read(file) {
@@ -172,13 +237,12 @@ export class VueDraft {
     if (this.child || this.state === 'starting') throw new Error('A draft preview is already running or starting.');
     this.state = 'starting';
     try {
-      const vite = join(this.directory, 'node_modules', 'vite', 'bin', 'vite.js');
-      if (!(await lstat(vite).catch(() => null))?.isFile()) throw new Error('Install the frontend dependencies before importing it.');
       await new Promise((resolve, reject) => {
         const check = createServer();
         check.once('error', () => reject(new Error('Preview port ' + port + ' is unavailable. Choose a different port.')));
         check.listen(port, 'localhost', () => check.close(resolve));
       });
+      await this.prepareDependencies();
       this.logs = '';
       this.url = 'http://localhost:' + port;
       const args = ['run','dev','--','--host','localhost','--port',String(port),'--strictPort'];
@@ -215,6 +279,75 @@ export class VueDraft {
     }
   }
 
+  async prepareDependencies() {
+    const from = join(this.source,'node_modules');
+    const to = join(this.directory,'node_modules');
+    const incompleteCopy = join(this.directory,'.open-studio-dependencies-incomplete');
+    if (windows && await lstat(incompleteCopy).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    })) {
+      this.dependenciesReady = false;
+      await rm(to,{recursive:true,force:true,maxRetries:4,retryDelay:150});
+      await unlink(incompleteCopy);
+    }
+    // Some Vite versions strip drive letters when serving assets through /@fs.
+    const crossDrive = windows && parse(from).root.toLowerCase() !== parse(to).root.toLowerCase();
+    if (this.dependenciesReady && !crossDrive) return;
+    const existing = crossDrive ? await lstat(to).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    }) : null;
+    const replaceLink = existing?.isSymbolicLink();
+    if (this.dependenciesReady && existing && !replaceLink) return;
+    this.dependenciesReady = false;
+    const vitePath = ['vite','bin','vite.js'];
+    const sourceModules = await lstat(from).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    });
+    if (!sourceModules?.isDirectory() || !(await lstat(join(from,...vitePath)).catch(() => null))?.isFile()) {
+      throw new Error('Install the frontend dependencies in the original folder before starting the preview.');
+    }
+    if (!crossDrive) {
+      try {
+        await symlink(from,to,windows ? 'junction' : 'dir');
+        this.dependenciesReady = true;
+        return;
+      } catch (error) {
+        if (!['EACCES','EPERM','ENOSYS','ENOTSUP','EXDEV','EINVAL'].includes(error.code)) throw error;
+        this.dependencyFallback = 'Could not link installed dependencies. Studio is using a private copy.';
+      }
+    } else {
+      this.dependencyFallback = 'Studio uses a private copy of dependencies for previews across Windows drives.';
+    }
+    // Windows can deny directory renames even when copying individual files succeeds.
+    // Keep a marker until the direct copy is complete so a retry can discard partial files.
+    const staging = windows ? null : await mkdtemp(join(this.directory,'.open-studio-dependencies-'));
+    try {
+      if (windows) {
+        if (replaceLink) await unlink(to);
+        const destination = await lstat(to).catch(error => {
+          if (error.code !== 'ENOENT') throw error;
+          return null;
+        });
+        if (destination) throw new Error('The draft already has a node_modules folder that Studio cannot replace.');
+        await writeFile(incompleteCopy,'',{flag:'wx'});
+      }
+      const copy = staging ? join(staging,'node_modules') : to;
+      await copyDependencies(from,copy,(copied,total) => { this.dependencyProgress = {copied,total}; });
+      if (!(await lstat(join(copy,...vitePath)).catch(() => null))?.isFile()) {
+        throw new Error('Vite could not be copied. This version needs an npm installation with local dependencies.');
+      }
+      if (staging) await rename(copy,to);
+      else await unlink(incompleteCopy);
+      this.dependenciesReady = true;
+    } finally {
+      this.dependencyProgress = null;
+      if (staging) await rm(staging,{recursive:true,force:true,maxRetries:4,retryDelay:150});
+    }
+  }
+
   async stop() {
     const child = this.child;
     this.child = undefined;
@@ -234,6 +367,10 @@ export class VueDraft {
 
   async close() {
     await this.stop();
+    if (this.metadata) {
+      await this.saveState();
+      return;
+    }
     if (dirname(this.directory) !== await realpath(tmpdir()) || !basename(this.directory).startsWith('open-studio-vue-')) {
       throw new Error('Unexpected draft cleanup path.');
     }

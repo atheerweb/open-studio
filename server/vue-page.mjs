@@ -26,13 +26,80 @@ export function matchPage(records, route) {
 }
 
 export function routeBridge(studioOrigin) {
-  return '(() => {' +
-    'if (parent === window) return;' +
-    'let last; const update = () => {' +
-    'const path = location.hash.startsWith("#/") ? location.hash.slice(1).split("?")[0] : location.pathname;' +
-    'if (path !== last) { last = path; parent.postMessage({type:"studio-vue-route",route:path},' + JSON.stringify(studioOrigin) + '); }' +
-    '}; update(); setInterval(update, 300);' +
-    '})();';
+  return '(' + previewBridge.toString() + ')(' + JSON.stringify(studioOrigin) + ');';
+}
+
+function previewBridge(studioOrigin) {
+  if (parent === window) return;
+  let last;
+  let picking = false;
+  let outline;
+  const update = (force = false) => {
+    const path = location.hash.startsWith('#/') ? location.hash.slice(1).split('?')[0] : location.pathname;
+    if (force === true || path !== last) {
+      last = path;
+      parent.postMessage({type:'studio-vue-route',route:path},studioOrigin);
+    }
+  };
+  const clearOutline = () => { outline?.remove(); outline = undefined; };
+  const describe = element => {
+    let owner = element;
+    while (owner && !owner.__vueParentComponent) owner = owner.parentElement;
+    let component = owner?.__vueParentComponent;
+    const name = component?.type?.__name || component?.type?.name || null;
+    while (component && !component.type?.__file && !component.vnode?.type?.__file) component = component.parent;
+    const path = [];
+    for (let node = element; node?.localName && path.length < 5; node = node.parentElement) {
+      const siblings = Array.from(node.parentElement?.children || []).filter(item => item.localName === node.localName);
+      path.unshift(node.localName + (node.id ? '#' + node.id : siblings.length > 1 ? ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : ''));
+      if (node.id) break;
+    }
+    return {component:component?.type?.__file || component?.vnode?.type?.__file || null,
+      componentName:name,element:{tag:element.localName,id:(element.id || '').slice(0,120),
+        path:path.join(' > ').slice(0,250),label:(element.getAttribute('aria-label') ||
+        element.textContent || '').trim().replace(/\s+/g,' ').slice(0,160)}};
+  };
+  update();
+  setInterval(update,300);
+  window.addEventListener('message',event => {
+    if (event.source !== parent || event.origin !== studioOrigin) return;
+    if (event.data?.type === 'studio-vue-hello') update(true);
+    if (event.data?.type === 'studio-vue-pick') {
+      picking = event.data.active === true;
+      if (!picking) clearOutline();
+    }
+  });
+  window.addEventListener('pointermove',event => {
+    if (!picking || !(event.target instanceof Element)) return;
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.setAttribute('aria-hidden','true');
+      Object.assign(outline.style,{position:'fixed',pointerEvents:'none',zIndex:'2147483647',
+        boxSizing:'border-box',border:'2px solid #3162ee',background:'rgba(49,98,238,.12)',borderRadius:'3px'});
+      document.documentElement.append(outline);
+    }
+    const {left,top,width,height} = event.target.getBoundingClientRect();
+    Object.assign(outline.style,{left:left+'px',top:top+'px',width:width+'px',height:height+'px'});
+  },true);
+  window.addEventListener('pointerleave',clearOutline);
+  window.addEventListener('scroll',clearOutline,true);
+  window.addEventListener('keydown',event => {
+    if (!picking || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    picking = false;
+    clearOutline();
+    parent.postMessage({type:'studio-vue-pick-cancel'},studioOrigin);
+  },true);
+  window.addEventListener('click',event => {
+    if (!picking || !(event.target instanceof Element)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    picking = false;
+    clearOutline();
+    update();
+    parent.postMessage({type:'studio-vue-selection',route:last,...describe(event.target)},studioOrigin);
+  },true);
 }
 
 export function applyPageEdit(source, patch) {

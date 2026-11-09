@@ -1,9 +1,14 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
-import { askCodex } from './codex.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { askCodex, listCodexModels, listCodexSkills, reasoningEfforts } from './codex.mjs';
+import { format } from 'prettier';
+import { chooseFrontendFolder } from './folder-picker.mjs';
 import { VueDraft } from './vue-draft.mjs';
 import { applyPageEdit } from './vue-page.mjs';
+import { approveDraftTurn, runDraftTurn, undoDraftTurn } from './draft-agent.mjs';
 
 const dist = new URL('../dist/',import.meta.url);
 const error = (status,message) => Object.assign(new Error(message),{status});
@@ -57,10 +62,18 @@ async function editPage(draft,input,ask) {
   return {message:result.message,changed:current.hash !== saved.hash,file:saved,previous:current.text};
 }
 
-export function createStudio({ask = askCodex} = {}) {
+const defaultStore = () => process.env.OPEN_STUDIO_DRAFTS_DIR || join(homedir(),'.open-studio','drafts');
+
+export function createStudio({ask = askCodex, runAgent, store, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
   let draft;
   let busy = false;
-  const summary = () => draft ? {name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs} : null;
+  const summary = () => draft ? {
+    name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
+    dependencyProgress:draft.dependencyProgress,dependencyFallback:draft.dependencyFallback,
+    messages:draft.messages,agentActivity:draft.agentActivity,canUndoAgent:!!draft.lastAgentEdits?.length,
+    pendingEdit:draft.pendingEdit && {id:draft.pendingEdit.id,impacts:draft.pendingEdit.impacts,
+      files:draft.pendingEdit.edits.map(edit => edit.file)}
+  } : null;
   const server = createServer(async (request,response) => {
     response.setHeader('Cache-Control','no-store');
     response.setHeader('X-Content-Type-Options','nosniff');
@@ -70,9 +83,20 @@ export function createStudio({ask = askCodex} = {}) {
       response.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});
       response.end(JSON.stringify(body));
     };
-    const host = '127.0.0.1:' + server.address().port;
-    if (request.headers.host !== host) return send(403,{error:'Invalid host.'});
+    const port = server.address().port;
+    const studioHost = 'localhost:' + port;
+    const legacyHost = '127.0.0.1:' + port;
+    const host = request.headers.host;
+    if (host !== studioHost && host !== legacyHost) return send(403,{error:'Invalid host.'});
     if (request.method === 'GET') {
+      // Match the preview's site so its SameSite cookies work inside the iframe.
+      if (host === legacyHost && ['/', '/vue'].includes(request.url)) {
+        response.writeHead(307,{Location:'http://' + studioHost + request.url});
+        return response.end();
+      }
+      if (serveDevelopment && !request.url?.startsWith('/api/')) {
+        return serveDevelopment(request,response,() => send(404,{error:'Route not found.'}));
+      }
       const path = ['/','/vue'].includes(request.url) ? 'index.html' : request.url?.slice(1);
       if (!path || (path !== 'index.html' && !/^assets\/[A-Za-z0-9._-]+\.(?:js|css)$/.test(path))) {
         return send(404,{error:'Route not found.'});
@@ -93,23 +117,92 @@ export function createStudio({ask = askCodex} = {}) {
     try {
       const input = await readRequest(request);
       if (input?.action === 'status') return send(200,{workspace:summary()});
-      if (input?.action === 'resolve') return send(200,{file:draft?.pageFile(normalizeRoute(input.route)) || null});
+      if (input?.action === 'agent-skills') return send(200,{skills:await listSkills(draft?.directory || process.cwd())});
+      if (input?.action === 'resolve') {
+        const route = normalizeRoute(input.route);
+        const normalize = path => {
+          const normalized = path.replaceAll('\\','/').split('?')[0];
+          return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+        };
+        const component = typeof input.component === 'string' ? normalize(input.component) : '';
+        const files = draft?.files || [];
+        const byPath = files.filter(file => component === normalize(file) || component.endsWith('/' + normalize(file)))
+          .sort((a,b) => b.length - a.length);
+        const nameHint = typeof input.componentName === 'string' ? input.componentName : '';
+        const shortName = (component.split('/').at(-1) || nameHint).replace(/\.vue$/i,'').toLowerCase();
+        const byName = files.filter(file => file.split('/').at(-1).slice(0,-4).toLowerCase() === shortName);
+        const selected = byPath[0] || (byName.length === 1 ? byName[0] : null);
+        const file = selected || draft?.pageFile(route) || null;
+        return send(200,input.selection ? {file,componentResolved:!!selected} : {file});
+      }
       if (busy) throw error(409,'The workspace is busy. Try again.');
       busy = ownsLock = true;
+      if (input?.action === 'pick-folder') {
+        return send(200,{folder:await pickFolder()});
+      }
       if (input?.action === 'import') {
         if (draft) throw error(409,'Close the current draft before importing another folder.');
-        draft = await VueDraft.open(input.folder);
+        draft = await VueDraft.open(input.folder,store);
       } else {
         if (!draft) throw error(409,'Import a Vue folder first.');
         switch (input?.action) {
           case 'start':
             if (input.approved !== true) throw error(403,'Approve the startup command first.');
-            await draft.installBridge('http://' + host);
+            await draft.installBridge('http://' + studioHost);
             await draft.start(input.port);
             break;
           case 'read': return send(200,await draft.read(input.file));
-          case 'write': return send(200,await draft.write(input.file,input.hash,input.text));
+          case 'format-source': {
+            if (!draft.files.includes(input.file) || typeof input.text !== 'string' || Buffer.byteLength(input.text) > 524288) {
+              throw error(400,'Choose a Vue file with at most 512 KiB of source.');
+            }
+            try {
+              return send(200,{text:await format(input.text,{parser:'vue',endOfLine:'auto'})});
+            } catch (failure) {
+              throw error(422,'Could not format this Vue file. ' + failure.message.split('\n')[0]);
+            }
+          }
+          case 'write':
+            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before saving.');
+            return send(200,await draft.write(input.file,input.hash,input.text));
           case 'chat': return send(200,await editPage(draft,input,ask));
+          case 'agent-turn': {
+            const route = normalizeRoute(input.route);
+            if (input.approved !== true) throw error(403,'Approve sharing project context with Codex first.');
+            if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 16000) {
+              throw error(400,'Enter a message between 1 and 16,000 characters.');
+            }
+            const file = draft.files.includes(input.file) ? input.file : draft.pageFile(route);
+            const element = input.element && Object.fromEntries(['tag','id','label','path'].map(key =>
+              [key,typeof input.element[key] === 'string' ? input.element[key].slice(0,250) : '']));
+            const {model,reasoningEffort,editApproval} = input;
+            if (model != null && (typeof model !== 'string' || !/^[a-z0-9][a-z0-9._:/-]{0,127}$/i.test(model))) {
+              throw error(400,'Choose a valid Codex model.');
+            }
+            if (reasoningEffort != null && !reasoningEfforts.includes(reasoningEffort)) throw error(400,'Choose a valid reasoning effort.');
+            if (editApproval != null && !['shared','all'].includes(editApproval)) throw error(400,'Choose an edit approval mode.');
+            await runDraftTurn(draft,{route,file,element,prompt:input.prompt,model,reasoningEffort,editApproval},runAgent);
+            break;
+          }
+          case 'agent-models': return send(200,{models:await listCodexModels(draft.directory)});
+          case 'agent-approval':
+            if (typeof input.approved !== 'boolean') throw error(400,'Choose whether to approve the edit.');
+            await approveDraftTurn(draft,input.id,input.approved);
+            break;
+          case 'agent-undo':
+            await undoDraftTurn(draft);
+            break;
+          case 'review': return send(200,await draft.review());
+          case 'resolve-conflict':
+            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before resolving a conflict.');
+            await draft.resolveConflict(input.file,input.originalHash,input.merged,input.keepOriginal === true);
+            await draft.refreshFiles();
+            return send(200,await draft.review());
+          case 'publish':
+            if (input.approved !== true || draft.state !== 'ready') throw error(403,'Review the diff and running preview before publishing.');
+            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before publishing.');
+            await draft.publish(input.token);
+            break;
           case 'close':
             await draft.close();
             draft = undefined;
@@ -128,16 +221,38 @@ export function createStudio({ask = askCodex} = {}) {
   return server;
 }
 
+export async function createDevelopmentStudio() {
+  const {createServer:createViteServer} = await import('vite');
+  const server = createStudio({
+    store:defaultStore(),
+    serveDevelopment:(request,response,next) => vite.middlewares(request,response,next)
+  });
+  const vite = await createViteServer({
+    root:fileURLToPath(new URL('../',import.meta.url)),
+    server:{middlewareMode:true,ws:{server}}
+  });
+  server.closeDevelopment = () => vite.close();
+  return server;
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const port = Number(process.env.OPEN_STUDIO_PORT || 4320);
+  const development = process.argv.includes('--dev');
+  const port = Number(process.env.OPEN_STUDIO_PORT || (development ? 4321 : 4320));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid Open Studio port.');
-  const server = createStudio();
-  server.on('error',failure => { console.error(failure.message); process.exitCode = 1; });
-  server.listen(port,'127.0.0.1',() => console.log('Open Studio: http://127.0.0.1:' + port));
+  const server = development ? await createDevelopmentStudio() : createStudio({store:defaultStore()});
+  server.on('error',async failure => {
+    console.error(failure.message);
+    process.exitCode = 1;
+    await server.closeDevelopment?.();
+  });
+  server.listen(port,'127.0.0.1',() => console.log('Open Studio: http://localhost:' + port));
   for (const signal of ['SIGINT','SIGTERM']) {
     process.once(signal,async () => {
       try { await server.closeWorkspace(); }
-      finally { server.close(); }
+      finally {
+        try { await server.closeDevelopment?.(); }
+        finally { server.close(); }
+      }
     });
   }
 }
