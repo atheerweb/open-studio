@@ -1,0 +1,74 @@
+:root {
+  color-scheme: dark;
+
+  /* Graphite surfaces and the Signal palette */
+  --graphite-950: #141613;
+  --graphite-900: #1a1c18;
+  --graphite-850: #20231e;
+  --graphite-800: #282c25;
+  --graphite-750: #33392f;
+  --graphite-700: #3d4538;
+  --graphite-500: #778271;
+  --graphite-300: #aeb8a8;
+  --graphite-50: #eef1e8;
+  --lime-300: #c6f56b;
+  --lime-200: #dcff9f;
+  --olive-850: #2c3720;
+  --olive-550: #738d4d;
+  --fern-900: #203529;
+  --fern-200: #a9dfb5;
+  --rose-900: #402b35;
+  --rose-200: #ffb5c9;
+  --amber-200: #f2cd91;
+  --violet-200: #d7c0ff;
+  --teal-200: #a0ded0;
+
+  /* Semantic roles shared across the workspace */
+  --ink: var(--graphite-50);
+  --muted: var(--graphite-300);
+  --shell: var(--graphite-950);
+  --panel: var(--graphite-900);
+  --ground: var(--graphite-850);
+  --paper: var(--graphite-800);
+  --soft: var(--graphite-750);
+  --border: var(--graphite-700);
+  --border-strong: var(--graphite-500);
+  --accent: var(--lime-300);
+  --accent-hover: var(--lime-200);
+  --on-accent: var(--graphite-950);
+  --accent-light: var(--olive-850);
+  --accent-border: var(--olive-550);
+  --focus-glow: color-mix(in srgb, var(--accent) 18%, transparent);
+  --success: var(--fern-200);
+  --success-surface: var(--fern-900);
+  --error: var(--rose-200);
+  --error-surface: var(--rose-900);
+  --warning: var(--amber-200);
+  --scrim: #0d100dba;
+  --shadow-raised: 0 8px 24px #0006;
+  --shadow-dialog: 0 20px 60px #0008;
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-code: "Cascadia Code", Consolas, ui-monospace, monospace;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --radius: 4px;
+  --radius-panel: 8px;
+  --ease-out: cubic-bezier(.2,.75,.25,1);
+
+  /* Component roles */
+  --header-height: 44px;
+  --activity-width: 48px;
+  --selection-bg: var(--accent);
+  --selection-ink: var(--on-accent);
+  --editor-bg: var(--ground);
+  --editor-line: color-mix(in srgb, var(--ink) 5%, var(--editor-bg));
+  --syntax-keyword: var(--rose-200);
+  --syntax-string: var(--amber-200);
+  --syntax-type: var(--teal-200);
+  --syntax-literal: var(--violet-200);
+  --syntax-call: var(--lime-200);
+  --syntax-comment: var(--graphite-300);
+}

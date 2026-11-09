@@ -1,14 +1,79 @@
 import React, {lazy, Suspense, useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {
-  ArrowRight, ArrowUp, ArrowUpRight, Braces, Check, ChevronDown, Code2, Command, FileCode2, FolderOpen,
-  GitCompareArrows, Globe2, Layers3, Monitor, MousePointer2, SlidersHorizontal,
-  CircleHelp, LoaderCircle, Play, Search, ShieldCheck, Smartphone, Sparkles, Square, Terminal, Undo2, X
+  ArrowRight, ArrowUp, ArrowUpRight, Check, ChevronDown, ChevronRight, Code2, Command, FileCode2, Folder, FolderOpen,
+  Files, GitBranch, GitCompareArrows, Globe2, MessageCircle, Monitor, MousePointer2, PanelRight, RefreshCw, SlidersHorizontal,
+  Activity, CircleHelp, LoaderCircle, Minus, Play, Plus, Search, ShieldCheck, Smartphone, Sparkles, Square, Terminal, Undo2, Wrench, X
 } from 'lucide-react';
 import './studio.css';
 import {SkillPrompt} from './skill-prompt.jsx';
+import {Select} from './select.jsx';
 
 const SourceEditor = lazy(() => import('./source-editor.jsx'));
+
+const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked']];
+const gitStatusNames = {A:'Added',M:'Modified',D:'Deleted',R:'Renamed',C:'Copied',T:'Type changed',U:'Conflict','?':'Untracked'};
+
+function gitFiles(result,group) {
+  if (!result?.available) return [];
+  return group === 'untracked' ? result.untracked.map(path=>({path,status:'?'})) : result[group];
+}
+
+function GitChanges({result,selected,onSelect,onRefresh,busy}) {
+  return <>
+    <div className="panel-label"><span>SOURCE CONTROL</span>
+      <button className="icon" aria-label="Refresh Git changes" title="Refresh Git changes" onClick={onRefresh} disabled={busy}><RefreshCw size={15}/></button>
+    </div>
+    {!result?.available ? <p className="scm-empty">{result?.reason || 'The imported folder is outside a Git working tree.'}</p>
+      : gitGroups.every(([group])=>!gitFiles(result,group).length) ? <p className="scm-empty">No Git changes.</p>
+      : <div className="scm-tree">{gitGroups.map(([group,label])=>{
+        const files = gitFiles(result,group);
+        if (!files.length) return null;
+        return <details key={group} open>
+          <summary><ChevronRight size={14} aria-hidden="true"/><span>{label}</span><span className="scm-count">{files.length}</span></summary>
+          {files.map(file=>{
+            const slash = file.path.lastIndexOf('/');
+            return <button key={file.path} className="scm-file" disabled={busy} title={file.path}
+              aria-current={selected?.group === group && selected.path === file.path ? 'true' : undefined}
+              onClick={()=>onSelect(group,file)}>
+              <FileCode2 size={15} aria-hidden="true"/><span className="scm-name">{file.path.slice(slash+1)}</span>
+              {slash >= 0 && <span className="scm-directory">{file.path.slice(0,slash)}</span>}
+              <span className="scm-status" data-status={file.status} aria-label={gitStatusNames[file.status]}>{file.status === '?' ? 'U' : file.status}</span>
+            </button>;
+          })}
+        </details>;
+      })}</div>}
+  </>;
+}
+
+function GitPatch({result,selected,content}) {
+  if (!selected) return <div className="empty-source scm-welcome"><GitCompareArrows size={28} aria-hidden="true"/>
+    <h2>Git Diff</h2><p>{!result?.available
+      ? result?.reason || 'The imported folder is outside a Git working tree.'
+      : gitGroups.some(([group])=>gitFiles(result,group).length)
+        ? 'Select a file in Source Control to view its changes.' : 'No Git changes.'}</p></div>;
+  const label = gitGroups.find(([group])=>group === selected.group)[1];
+  let oldLine = null;
+  let newLine = null;
+  return <>
+    <div className="source-head scm-path"><FileCode2 size={16} aria-hidden="true"/><span title={selected.path}>{selected.path}</span><small>{label}</small></div>
+    {content?.text != null ? <pre className="scm-patch scm-new-file">{content.text}</pre>
+      : content?.patch ? <pre className="scm-patch">{content.patch.replace(/\n$/,'').split('\n').map((line,index)=>{
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+        if (hunk) {
+          oldLine = Number(hunk[1]);
+          newLine = Number(hunk[2]);
+        }
+        const inHunk = oldLine !== null && /^[ +\-]/.test(line);
+        const kind = hunk ? 'hunk' : !inHunk ? 'meta' : line[0] === '+' ? 'add' : line[0] === '-' ? 'remove' : 'context';
+        return <span key={index} className={'scm-line '+kind}>
+          <span className="scm-gutter" aria-hidden="true">{inHunk && kind !== 'add' ? oldLine++ : ''}</span>
+          <span className="scm-gutter" aria-hidden="true">{inHunk && kind !== 'remove' ? newLine++ : ''}</span>
+          <span>{line}{'\n'}</span>
+        </span>;
+      })}</pre> : <p className="scm-empty">{content?.message || 'No patch available for this file.'}</p>}
+  </>;
+}
 
 async function api(action, values = {}) {
   const response = await fetch('/api/vue',{
@@ -32,6 +97,49 @@ function AgentReply({text}) {
   })}</p>;
 }
 
+const activityStates = {
+  running: {label:'Running',icon:LoaderCircle},
+  completed: {label:'Completed',icon:Check},
+  failed: {label:'Failed',icon:X},
+  interrupted: {label:'Interrupted',icon:Minus}
+};
+
+function AgentActivity({status,steps}) {
+  const current = status && steps.findLast(step => step.state === 'running');
+  const summary = current ? current.kind === 'command' ? 'Running command' : 'Using tool' : status;
+  return <div className="agent-activity" data-live={Boolean(status)}>
+    {status && <div className="agent-activity-current" role="status">
+      <span className="activity-live-icon"><LoaderCircle size={17} aria-hidden="true"/></span>
+      <div><span className="activity-eyebrow">Codex is working</span><strong>{summary}</strong>
+        {current?.detail && <code dir="auto">{current.detail}</code>}
+      </div>
+    </div>}
+    {steps.length > 0 && <details>
+      <summary>
+        <Activity size={15} aria-hidden="true"/>
+        <span>Activity</span>
+        <span className="activity-count">{steps.length} {steps.length === 1 ? 'step' : 'steps'}</span>
+        <ChevronDown className="activity-chevron" size={14} aria-hidden="true"/>
+      </summary>
+      <ol>{steps.map(step => {
+        const {label,icon:StateIcon} = activityStates[step.state] || activityStates.completed;
+        const StepIcon = step.kind === 'command' ? Terminal : Wrench;
+        return <li key={step.id} data-state={step.state}>
+          <span className="activity-marker"><StepIcon size={14} aria-hidden="true"/></span>
+          <div className="activity-step">
+            <div className="activity-step-heading">
+              <strong>{step.kind === 'command' ? 'Command' : 'Tool'}</strong>
+              <span className="activity-state"><StateIcon size={12} aria-hidden="true"/>{label}</span>
+            </div>
+            {step.detail && <code dir="auto">{step.detail}</code>}
+            {step.exitCode != null && <span className="activity-exit">Exit code {step.exitCode}</span>}
+          </div>
+        </li>;
+      })}</ol>
+    </details>}
+  </div>;
+}
+
 function diffLines(before, after) {
   if (before === after) return [];
   const left = before.split('\n'), right = after.split('\n');
@@ -45,26 +153,105 @@ function diffLines(before, after) {
   ];
 }
 
+function folderTree(paths) {
+  const root = {folders:new Map(), files:[]};
+  for (const path of paths) {
+    const segments = path.split('/');
+    const name = segments.pop();
+    let folder = root;
+    for (const segment of segments) {
+      if (!folder.folders.has(segment)) folder.folders.set(segment,{folders:new Map(), files:[]});
+      folder = folder.folders.get(segment);
+    }
+    folder.files.push({name,path});
+  }
+  return root;
+}
+
+function FileList({files, filter, active, onChoose, busy}) {
+  const query = filter.trim().toLowerCase();
+  const matches = query ? files.filter(path=>path.toLowerCase().includes(query)) : [];
+  const row = (name,path) => <button key={path} type="button" className="file-row"
+    aria-current={active === path ? 'true' : undefined} onClick={()=>onChoose(path)} disabled={busy} title={path}>
+    <FileCode2 size={14} aria-hidden="true"/><span>{name}</span>
+  </button>;
+  const tree = folder => <>
+    {[...folder.folders].map(([name,child])=><details key={name} open>
+      <summary><ChevronRight size={12} aria-hidden="true"/><Folder size={14} aria-hidden="true"/><span>{name}</span></summary>
+      <div className="folder-children">{tree(child)}</div>
+    </details>)}
+    {folder.files.map(({name,path})=>row(name,path))}
+  </>;
+  return <div className="file-list">
+    <div hidden={!!query}>{tree(folderTree(files))}</div>
+    {query && matches.map(path=>row(path,path))}
+    {!(query ? matches.length : files.length) && <small>{query ? 'No matching files.' : 'No Vue files found.'}</small>}
+  </div>;
+}
+
 function EmptyPreview({onImport, workspace, onStart, busy}) {
   return <div className="empty-preview">
-    <div className="diagram" aria-hidden="true">
-      <div className="diagram-window"><div className="diagram-bar"><i/><i/><i/><span/></div>
-        <div className="diagram-body"><div className="diagram-sidebar"><i/><i/><i/></div>
-          <div className="diagram-main"><b/><div className="diagram-grid"><i/><i/><i/></div>
-            <div className="diagram-chart"><i/><i/><i/><i/><i/><i/><i/></div>
-          </div>
-        </div>
-      </div>
-      <div className="diagram-chip"><Play size={15} fill="currentColor"/></div>
-      <div className="diagram-code"><Code2 size={21}/></div>
+    <div className="preview-intro">
+      <span className="preview-kicker"><i aria-hidden="true"/>{workspace ? 'PRIVATE DRAFT' : 'LOCAL WORKBENCH'}</span>
+      <h1>{workspace ? 'Your draft is ready to run' : 'Start with a Vue project'}</h1>
+      <p>{workspace ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
+        : 'Open a local project, preview your changes, and review the diff before publishing.'}</p>
+      <button className="primary" disabled={busy} onClick={workspace ? onStart : onImport}>
+        {workspace ? <Play size={16} aria-hidden="true"/> : <FolderOpen size={17} aria-hidden="true"/>}
+        {workspace ? 'Start preview' : 'Import Vue project'} <ArrowRight size={16} aria-hidden="true"/>
+      </button>
     </div>
-    <h1>{workspace ? 'Your draft is ready to run' : 'Start with a Vue project'}</h1>
-    <p>{workspace ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
-      : 'Import a local folder to see your app here. Browse to any page, describe a change, and review the Vue diff beside the preview.'}</p>
-    <button className="primary" disabled={busy} onClick={workspace ? onStart : onImport}>
-      {workspace ? <Play size={16}/> : <FolderOpen size={17}/>}
-      {workspace ? 'Start preview' : 'Import Vue project'} <ArrowRight size={16}/>
-    </button>
+    <svg className="preview-mark" viewBox="0 0 348 274" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="workbench-glass" x2="1" y2="1">
+          <stop className="glass-highlight"/>
+          <stop className="glass-base" offset="1"/>
+        </linearGradient>
+        <radialGradient id="workbench-shadow">
+          <stop stopOpacity=".55"/>
+          <stop offset="1" stopOpacity="0"/>
+        </radialGradient>
+      </defs>
+      <ellipse cx="174" cy="232" rx="162" ry="39" fill="url(#workbench-shadow)"/>
+      <path className="workbench-guide" d="M18 72v103m311-69v103M199 153v102" strokeDasharray="2 5"/>
+
+      {/* Source layer */}
+      <g transform="translate(0 98)">
+        <path className="workbench-edge" d="m27 67 172 80 115-54v10l-115 54-172-80Z"/>
+        <g transform="matrix(.86 .4 -.86 .4 142 13)">
+          <rect className="workbench-plate" width="200" height="134"/>
+          <path className="workbench-rule" d="M29 0v134M0 88h200"/>
+          <path className="workbench-code" d="M42 99h24m9 0h29m-52 10h40m10 0h36m-86 10h22m9 0h53" strokeWidth="3"/>
+          <path className="workbench-rule" d="M12 99h5m-5 10h5m-5 10h5"/>
+        </g>
+      </g>
+
+      {/* Live preview layer */}
+      <g transform="translate(0 49)">
+        <path className="workbench-edge" d="m27 67 172 80 115-54v9l-115 54-172-80Z"/>
+        <g transform="matrix(.86 .4 -.86 .4 142 13)">
+          <rect className="workbench-plate" width="200" height="134"/>
+          <rect className="workbench-tile" x="15" y="70" width="170" height="48" rx="6"/>
+          <path className="workbench-trace" d="M27 105h34l17-16 14 10 21-18 23 24h36" strokeWidth="2"/>
+          <circle className="workbench-signal" cx="113" cy="81" r="3"/>
+        </g>
+      </g>
+
+      {/* Draft diff layer */}
+      <path className="workbench-glass-edge" d="m27 67 172 80 115-54v7l-115 54-172-80Z"/>
+      <g transform="matrix(.86 .4 -.86 .4 142 13)">
+        <rect className="workbench-glass" width="200" height="134" fill="url(#workbench-glass)"/>
+        <path className="workbench-rule" d="M0 23h200M32 23v111"/>
+        <path className="workbench-trace" d="M12 12h4m6 0h4m6 0h4m121 0h27" strokeWidth="2"/>
+        <rect className="workbench-tile" x="45" y="38" width="139" height="27" rx="5"/>
+        <rect className="workbench-added" x="45" y="71" width="139" height="27" rx="5"/>
+        <path className="workbench-code" d="M58 51h10m14 0h48m8 0h28M82 112h32m8 0h21" strokeWidth="3"/>
+        <path className="workbench-trace" d="M58 85h10m-5-5v10m19-5h59m8 0h17" strokeWidth="3"/>
+      </g>
+      <path className="workbench-trace" d="m27 67 172 80 115-54M27 116l16 8m248 27 23-9M183 238l16 7 15-7"/>
+      <circle className="workbench-signal" cx="199" cy="147" r="2.5"/>
+      <circle className="workbench-signal" cx="314" cy="93" r="2.5"/>
+    </svg>
   </div>;
 }
 
@@ -86,13 +273,19 @@ function App() {
   const [componentResolved,setComponentResolved] = useState(false);
   const [picking,setPicking] = useState(false);
   const [review,setReview] = useState(null);
+  const [gitDiff,setGitDiff] = useState(null);
+  const [gitFile,setGitFile] = useState(null);
+  const [gitContent,setGitContent] = useState(null);
   const [resolution,setResolution] = useState(null);
   const [previewChecked,setPreviewChecked] = useState(false);
   const [tab,setTab] = useState('Preview');
   const [device,setDevice] = useState('desktop');
   const [filter,setFilter] = useState('');
   const [logOpen,setLogOpen] = useState(false);
-  const [prompt,setPrompt] = useState('');
+  const [explorerOpen,setExplorerOpen] = useState(true);
+  const [sidebar,setSidebar] = useState('explorer');
+  const [agentOpen,setAgentOpen] = useState(true);
+  const [sessionPrompts,setSessionPrompts] = useState({});
   const [consent,setConsent] = useState(false);
   const [models,setModels] = useState([]);
   const [modelStatus,setModelStatus] = useState('idle');
@@ -100,12 +293,21 @@ function App() {
   const [reasoningEffort,setReasoningEffort] = useState('');
   const [editApproval,setEditApproval] = useState('shared');
   const preview = useRef(null);
+  const pickerButton = useRef(null);
   const dialog = useRef(null);
   const chatLog = useRef(null);
   const followChat = useRef(true);
   const dirty = Boolean(file && editor !== file.text);
   const ready = workspace?.state === 'ready';
+  const canPick = ready && !!route && !dirty && !busy;
+  const selectedElement = selection?.route === route ? selection.element : null;
+  const elementName = selectedElement && '<' + selectedElement.tag +
+    (selectedElement.id ? '#' + selectedElement.id : '') + '>';
   const messages = workspace?.messages || [];
+  const sessionId = workspace?.activeSessionId;
+  const sessionTitle = workspace?.sessions?.find(session=>session.id === sessionId)?.title;
+  const prompt = sessionPrompts[sessionId] || '';
+  const setPrompt = value => setSessionPrompts(prompts=>({...prompts,[sessionId]:value}));
   const target = (manualRoute === route ? file?.file : null) || pageFile;
   const selectedModel = models.find(item => item.id === model);
   const pending = workspace?.pendingEdit;
@@ -150,14 +352,18 @@ function App() {
     if (!importOpen && dialog.current.open) dialog.current.close();
   },[importOpen]);
   useEffect(() => {
-    if (chatLog.current && followChat.current) chatLog.current.scrollTop = chatLog.current.scrollHeight;
-  },[messages.length,latestMessage,activity,pending]);
+    if (agentOpen && chatLog.current && followChat.current) chatLog.current.scrollTop = chatLog.current.scrollHeight;
+  },[agentOpen,sessionId,messages.length,latestMessage,activity,workspace?.agentSteps,pending]);
   useEffect(() => {
     if (!ready) return;
     const listen = event => {
       if (event.source !== preview.current?.contentWindow ||
           event.origin !== new URL(workspace.url).origin) return;
-      if (event.data?.type === 'studio-vue-pick-cancel') return setPicking(false);
+      if (event.data?.type === 'studio-vue-pick-cancel') {
+        setPicking(false);
+        pickerButton.current?.focus({preventScroll:true});
+        return;
+      }
       if (!['studio-vue-route','studio-vue-selection'].includes(event.data?.type) ||
           typeof event.data.route !== 'string' || !/^\/(?!\/)[^?#\r\n]{0,499}$/.test(event.data.route)) return;
       setRoute(event.data.route);
@@ -174,6 +380,23 @@ function App() {
     window.addEventListener('message',listen);
     return () => window.removeEventListener('message',listen);
   },[ready,workspace?.url]);
+  useEffect(() => {
+    if (!picking) return;
+    const cancel = () => {
+      if (workspace?.url) preview.current?.contentWindow?.postMessage(
+        {type:'studio-vue-pick',active:false},new URL(workspace.url).origin);
+      setPicking(false);
+    };
+    if (!canPick || tab !== 'Preview') return cancel();
+    const onKeyDown = event => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      cancel();
+      pickerButton.current?.focus({preventScroll:true});
+    };
+    window.addEventListener('keydown',onKeyDown);
+    return () => window.removeEventListener('keydown',onKeyDown);
+  },[picking,canPick,tab,workspace?.url]);
   useEffect(() => {
     setPageFile(null);
     setComponentResolved(false);
@@ -224,6 +447,7 @@ function App() {
     if (!folder) return;
     perform('Importing frontend…',async () => {
       setWorkspace((await api('import',{folder})).workspace);
+      setTab('Preview');
       setFolder('');
       setImportOpen(false);
       setNotice({text:'Private draft created.'});
@@ -247,8 +471,9 @@ function App() {
     perform('Closing draft…',async () => {
       await api('close');
       setWorkspace(null); setRoute(null); setPageFile(null); setManualRoute(null);
-      setResolving(false); setSelection(null); setPicking(false); setReview(null); setResolution(null);
-      setPreviewChecked(false); setConsent(false); setPrompt(''); setTab('Preview');
+      setResolving(false); setSelection(null); setPicking(false); setReview(null); setGitDiff(null); setResolution(null);
+      setGitFile(null); setGitContent(null); setSidebar('explorer');
+      setPreviewChecked(false); setConsent(false); setSessionPrompts({}); setTab('Preview');
       openFile(null);
     });
   }
@@ -284,6 +509,13 @@ function App() {
       setModelStatus(error.message === 'Unknown workspace action.' ? 'unsupported' : 'failed');
     }
   }
+  function selectSession(id) {
+    perform('Opening chat session…',async () => {
+      const result = await api('agent-session',{sessionId:id});
+      followChat.current = true;
+      setWorkspace(result.workspace);
+    });
+  }
   function send(event) {
     event.preventDefault();
     const request = prompt.trim();
@@ -292,7 +524,7 @@ function App() {
     setPrompt('');
     perform('Waiting for Codex…',async () => {
       try {
-        await api('agent-turn',{route,file:target,element:selection?.route === route ? selection.element : null,prompt:request,approved:true,
+        await api('agent-turn',{sessionId,route,file:target,element:selection?.route === route ? selection.element : null,prompt:request,approved:true,
           model:model || undefined,reasoningEffort:reasoningEffort || undefined,editApproval});
       } finally {
         await refreshDraft();
@@ -303,7 +535,7 @@ function App() {
     const result = await api('status');
     setWorkspace(result.workspace);
     if (file) openFile(result.workspace.files.includes(file.file) ? await api('read',{file:file.file}) : null);
-    if (tab === 'Diff') setReview(await api('review'));
+    if (tab === 'Publish') setReview(await api('review'));
     setPreviewChecked(false);
   }
   function decide(approved) {
@@ -325,11 +557,46 @@ function App() {
   }
   function view(name) {
     if (picking && name !== 'Preview') togglePicker(false);
-    if (name !== 'Diff' || !workspace) return setTab(name);
-    perform('Loading changes…',async () => {
+    if (name === 'Source') {
+      setSidebar('explorer');
+      setTab(name);
+      const defaultFile = pageFile || workspace?.files[0];
+      if (!file && defaultFile) choose(defaultFile);
+      return;
+    }
+    if (!workspace || !['Diff','Publish'].includes(name)) return setTab(name);
+    if (name === 'Diff') {
+      return perform('Loading Git changes…',async () => {
+        const result = await api('git-diff');
+        const changes = gitGroups.flatMap(([group])=>gitFiles(result,group).map(change=>({...change,group})));
+        const selection = changes.find(change=>change.group === gitFile?.group && change.path === gitFile.path)
+          || changes.find(change=>change.path === file?.file && change.group === 'unstaged')
+          || changes.find(change=>change.path === file?.file)
+          || changes[0] || null;
+        setGitDiff(result);
+        setGitContent(null);
+        setGitFile(null);
+        setSidebar('git');
+        setExplorerOpen(true);
+        setTab(name);
+        if (selection) {
+          setGitContent(await api('git-file',selection));
+          setGitFile(selection);
+        }
+      });
+    }
+    perform('Loading draft review…',async () => {
       setReview(await api('review'));
       setResolution(null);
       setPreviewChecked(false);
+      setTab(name);
+    });
+  }
+  function openGitFile(group,file) {
+    perform('Loading file diff…',async () => {
+      const selection = {...file,group};
+      setGitContent(await api('git-file',selection));
+      setGitFile(selection);
       setTab('Diff');
     });
   }
@@ -351,30 +618,61 @@ function App() {
       }
     });
   }
-  const changes = file ? diffLines(file.original,file.text) : [];
-  const shownFiles = workspace?.files.filter(path => path.toLowerCase().includes(filter.toLowerCase())) || [];
+  const views = [['Preview',Globe2],['Source',Code2],['Diff',GitCompareArrows]];
+  if (workspace) views.push(['Publish',ArrowUpRight]);
   return <>
     <header className="topbar">
-      <div className="brand"><div className="brand-icon"><Layers3 size={21}/></div><span>Open Studio</span><small>WORKSPACE</small></div>
-      <div className="top-right"><span className="pill"><i/> Local workspace</span><span className="top-divider"/><span className="codex-mark"><Command size={16}/> Codex</span></div>
+      <div className="brand">
+        <div className="brand-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">
+            <path d="M10 4H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h3m4-16h3a3 3 0 0 1 3 3v2m0 6v2a3 3 0 0 1-3 3h-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            <circle cx="12" cy="12" r="2.75" fill="currentColor"/>
+          </svg>
+        </div>
+        <span>Open Studio</span>
+      </div>
+      <div className="workspace-path">
+        <span className="workspace-label">LOCAL</span><span title={workspace?.name}>{workspace?.name || 'Workspace'}</span>
+      </div>
+      <div className="top-right">
+        <div className="panel-controls" role="group" aria-label="Workspace panels">
+          <button type="button" className="panel-toggle" aria-label="Agent Chat" aria-controls="agent-chat"
+            aria-expanded={agentOpen} onClick={()=>setAgentOpen(open=>!open)}>
+            <PanelRight size={17} aria-hidden="true"/><span>Agent Chat</span>
+          </button>
+        </div>
+      </div>
     </header>
-    <main className="layout">
-      <aside className="explorer" aria-label="Project explorer">
-        <div className="panel-label"><span>EXPLORER</span><FolderOpen size={16}/></div>
-        <div className="project"><div className="project-icon"><Braces size={18}/></div><div><strong>{workspace?.name || 'Vue workspace'}</strong><small>{workspace ? 'Private draft' : 'No folder imported'}</small></div></div>
+    <main className="layout" data-explorer-open={explorerOpen} data-agent-open={agentOpen}>
+      <nav className="activity-bar" aria-label="Workspace activity">
+        <button className="activity-button" title="Explorer" aria-label="Explorer" aria-controls="workspace-sidebar"
+          aria-expanded={explorerOpen && sidebar === 'explorer'} onClick={()=>{
+            setExplorerOpen(sidebar !== 'explorer' || !explorerOpen);
+            setSidebar('explorer');
+          }}><Files size={22} aria-hidden="true"/></button>
+        <button className="activity-button" title="Source Control" aria-label="Source Control" aria-controls="workspace-sidebar"
+          aria-expanded={explorerOpen && sidebar === 'git'} disabled={!workspace || !!busy}
+          onClick={()=>sidebar === 'git' && explorerOpen && tab === 'Diff' ? setExplorerOpen(false) : view('Diff')}>
+          <GitBranch size={22} aria-hidden="true"/>
+        </button>
+      </nav>
+      <aside id="workspace-sidebar" className="explorer" aria-label={sidebar === 'git' ? 'Source Control' : 'Project explorer'}
+        inert={!explorerOpen} aria-hidden={!explorerOpen}>
+        {sidebar === 'git' ? <GitChanges result={gitDiff} selected={gitFile} onSelect={openGitFile} onRefresh={()=>view('Diff')} busy={!!busy}/> : <>
+        <div className="panel-label"><span>EXPLORER</span><FolderOpen size={15} aria-hidden="true"/></div>
+        <div className="project"><FolderOpen size={15} aria-hidden="true"/><strong title={workspace?.name}>{workspace?.name || 'No folder imported'}</strong></div>
         {workspace ? <>
           <label className="search"><Search size={15}/><input aria-label="Filter source files" placeholder="Filter files…" value={filter} onChange={e=>setFilter(e.target.value)}/></label>
-          <div className="file-list">{shownFiles.map(path => <button key={path} type="button" className={file?.file === path ? 'active' : ''} onClick={()=>choose(path)} disabled={!!busy} title={path}>
-            <FileCode2 size={15}/><span>{path.split('/').at(-1)}</span>
-          </button>)}{!shownFiles.length && <small>No matching files.</small>}</div>
+          <FileList files={workspace.files} filter={filter} active={file?.file} onChoose={choose} busy={!!busy}/>
           <button className="quiet explorer-action" onClick={close} disabled={!!busy}><Square size={14}/> Close draft</button>
         </> : <button className="quiet explorer-action" onClick={()=>setImportOpen(true)}><FolderOpen size={16}/> Import folder</button>}
         <div className="explorer-foot"><Terminal size={15}/><button className="text-button" onClick={()=>setLogOpen(!logOpen)}>Runtime log</button></div>
+        </>}
       </aside>
       <section className="canvas" aria-label="Editor workspace">
         <div className="canvas-toolbar">
-          <div className="tabs" role="group" aria-label="Workspace view">{[['Preview',Globe2],['Source',Code2],['Diff',GitCompareArrows]].map(([name,Icon])=>
-            <button key={name} className={tab === name ? 'active' : ''} aria-pressed={tab === name} onClick={()=>view(name)} disabled={!!busy}><Icon size={15}/>{name}{name === 'Diff' && changes.length > 0 && <i/>}</button>)}</div>
+          <div className="tabs" role="group" aria-label="Workspace view">{views.map(([name,Icon])=>
+            <button key={name} className={tab === name ? 'active' : ''} aria-pressed={tab === name} onClick={()=>view(name)} disabled={!!busy}><Icon size={15} aria-hidden="true"/>{name}</button>)}</div>
           <div className="view-actions">
             <button className="icon" aria-label="Desktop viewport" aria-pressed={device === 'desktop'} onClick={()=>setDevice('desktop')}><Monitor size={16}/></button>
             <button className="icon" aria-label="Mobile viewport" aria-pressed={device === 'mobile'} onClick={()=>setDevice('mobile')}><Smartphone size={16}/></button>
@@ -382,22 +680,34 @@ function App() {
           </div>
         </div>
         <div className="canvas-content">
-          <div className={'preview-box '+device} hidden={tab !== 'Preview'}>
+          <div className={'preview-box '+device} data-picking={picking} hidden={tab !== 'Preview'}>
             {ready ? <>
               <div className="browserbar"><div className="dots" aria-hidden="true"><i/><i/><i/></div>
                 <div><Globe2 size={13}/><span>{workspace.url}{route && route !== '/' ? route : ''}</span></div>
-                <button className="quiet picker-button" aria-pressed={picking} disabled={dirty || !!busy || !route}
-                  title={route ? undefined : 'Waiting for the preview to connect'}
-                  onKeyDown={event=>{if (event.key === 'Escape' && picking) togglePicker(false);}}
-                  onClick={()=>togglePicker(!picking)}><MousePointer2 size={15}/>{picking ? 'Cancel' : 'Select element'}</button></div>
-              {picking && <div className="picker-instructions" role="status"><MousePointer2 size={15}/>
-                <span>Click an element to give Codex its context.</span><kbd>Esc</kbd><span>to cancel</span></div>}
-              <iframe ref={preview} title="Vue draft preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
+                <button ref={pickerButton} className="quiet picker-button" aria-pressed={picking} disabled={!canPick}
+                  aria-describedby={picking ? 'picker-guide' : undefined}
+                  title={dirty ? 'Save your source changes first' : !route ? 'Waiting for the preview to connect' : undefined}
+                  onClick={()=>togglePicker(!picking)}>
+                  {picking ? <X size={15} aria-hidden="true"/> : <MousePointer2 size={15} aria-hidden="true"/>}
+                  {picking ? 'Cancel selection' : selectedElement ? 'Pick again' : 'Select element'}
+                </button></div>
+              <div className="preview-frame">
+                <iframe ref={preview} title="Vue draft preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
+                <div className="picker-guide" id="picker-guide" aria-hidden={!picking}>
+                  <MousePointer2 size={17} aria-hidden="true"/>
+                  <span><strong>Pick an element</strong><small>Click or tap, or press Tab then Enter.</small></span>
+                  <kbd>Esc</kbd>
+                </div>
+              </div>
             </> : <EmptyPreview workspace={workspace} onImport={()=>setImportOpen(true)} onStart={start} busy={!!busy}/>}
           </div>
-          {tab === 'Source' && <div className="source-box vscode-source">
+          {tab === 'Source' && <div className="source-box draft-source">
             {file ? <>
-              <div className="source-head"><FileCode2 size={16}/><span title={file.file}>{file.file}</span></div>
+              <div className="source-head">
+                <FileCode2 size={16} aria-hidden="true"/>
+                <span className="source-path" title={file.file}>{file.file}</span>
+                <small className={dirty ? 'source-state dirty' : 'source-state'}>{dirty ? 'Unsaved' : 'Draft'}</small>
+              </div>
               <Suspense fallback={<div className="source-editor" role="status">Loading editor…</div>}>
                 <SourceEditor key={file.file} value={editor} onChange={setEditor} disabled={!!busy}/>
               </Suspense>
@@ -413,8 +723,12 @@ function App() {
             </> : <div className="empty-source"><Code2 size={28}/><h2>No file selected</h2><p>Open a preview page or select a Vue file in Explorer.</p></div>}
           </div>}
           {tab === 'Diff' && <div className="source-box">
+            {workspace ? <GitPatch result={gitDiff} selected={gitFile} content={gitContent}/>
+              : <div className="empty-source"><GitCompareArrows size={28}/><h2>Git Diff</h2><p>Import a project to see its Git changes.</p></div>}
+          </div>}
+          {tab === 'Publish' && <div className="source-box">
             <div className="source-head"><GitCompareArrows size={16}/><span>Changes to publish</span></div>
-            <div className="publish-review">
+            <div className="change-list">
               {!review?.changes.length && <p>No saved changes to publish.</p>}
               {review?.changes.map(change => <details key={change.file} open={change.conflict || undefined}>
                 <summary>{change.kind} · {change.file}{change.conflict && ' · Conflict'}</summary>
@@ -450,23 +764,41 @@ function App() {
         </div>
         <div className={'statusbar'+(notice?.error ? ' error' : '')} role="status"><span><i/>{previewProgress
           ? 'Copying dependencies (' + previewProgress.copied + '/' + previewProgress.total + ')'
-          : workspace?.agentActivity || busy || notice?.text || workspace?.dependencyFallback || (ready ? 'Preview running' : 'Ready')}</span><span>Private draft</span></div>
+          : workspace?.agentActivity || busy || notice?.text || (picking ? 'Element picker active' :
+            elementName ? 'Element attached to Agent Chat' : workspace?.dependencyFallback || (ready ? 'Preview running' : 'Ready'))}</span>
+          <span className="status-mode"><ShieldCheck size={13} aria-hidden="true"/>{workspace ? 'Private draft' : 'Local workspace'}</span></div>
       </section>
-      <aside className="agent" aria-label="Codex page chat">
-        <div className="agent-title"><div className="agent-icon"><Sparkles size={19}/></div><div><strong>Page agent</strong><small>Powered by Codex</small></div><span className="agent-badge">AI</span></div>
+      <aside id="agent-chat" className="agent" aria-label="Codex page chat"
+        inert={!agentOpen} aria-hidden={!agentOpen}>
+        <div className="agent-title"><MessageCircle size={16} aria-hidden="true"/><strong>Agent Chat</strong><span className="agent-badge"><Command size={12} aria-hidden="true"/> CODEX</span></div>
+        {workspace?.sessions && <div className="agent-sessions">
+          <label className="sr-only" htmlFor="agent-session">Chat session</label>
+          <Select id="agent-session" value={sessionId}
+            selectedLabel={sessionTitle} title={sessionTitle} disabled={!!busy || !!pending}
+            onChange={event=>selectSession(event.target.value)}>
+            {workspace.sessions.map(({id,title})=><option key={id} value={id}>{title}</option>)}
+          </Select>
+          <button type="button" className="quiet" disabled={!!busy || !!pending} onClick={()=>selectSession(null)}>
+            <Plus size={15} aria-hidden="true"/>New session
+          </button>
+        </div>}
         <div className="page-context"><small>PAGE CONTEXT</small><span><Globe2 size={14}/>{route || 'Waiting for preview'}</span><p>{resolving ? 'Finding Vue source…' : target || (route ? 'Page context' : 'Open a page to connect its source.')}</p>
-          {selection?.route === route && selection?.element && <div className="selection-context">
-            <div><MousePointer2 size={14}/><code>&lt;{selection.element.tag}{selection.element.id && '#' + selection.element.id}&gt;</code>
-              <button type="button" className="icon" aria-label="Clear selected element" onClick={()=>setSelection(null)}><X size={14}/></button></div>
-            {selection.element.label && <p dir="auto">{selection.element.label}</p>}
+          {selectedElement && <div className="selection-context">
+            <div><Check size={14} aria-hidden="true"/><code title={elementName}>{elementName}</code>
+              <button type="button" className="icon" aria-label="Clear selected element" onClick={()=>setSelection(null)}><X size={15} aria-hidden="true"/></button></div>
+            {selectedElement.label && <p dir="auto">{selectedElement.label}</p>}
             <p>{resolving ? 'Looking up the component…' : componentResolved ? 'Component attached' :
               target ? 'Element attached with page source' : 'Element attached. Select a Vue file in Explorer to add source.'}</p>
           </div>}</div>
         <div className="chat" ref={chatLog} role="log" aria-label="Page messages" tabIndex={0}
           onScroll={event=>{const log = event.currentTarget; followChat.current = log.scrollHeight - log.scrollTop - log.clientHeight < 48;}}>
-          {!messages.length && !activity && <div className="chat-empty"><div><Sparkles size={20}/></div><h2>Make a change</h2><p>Describe what you want to see on this page. Codex edits your private draft so you can check the result live.</p></div>}
+          {!messages.length && !activity && <div className="chat-empty">
+            <div className="chat-avatar"><Sparkles size={17} aria-hidden="true"/></div>
+            <section><h2>What would you like to change?</h2><p>Describe an edit and review the result in your private draft.</p></section>
+          </div>}
           {messages.map((message,index)=><article className={'message '+(message.author === 'You' ? 'user' : '')}
             key={JSON.stringify([index,message.author,message.route,message.text])}>
+            {message.activity?.length > 0 && <AgentActivity steps={message.activity}/>}
             <div className="message-meta"><strong>{message.author}</strong>{message.route && <span>{message.route}</span>}</div>
             {message.author === 'Codex' ? <AgentReply text={message.text}/> : <p dir="auto">{message.text}</p>}
             {message.question && <div className="agent-question">
@@ -482,9 +814,7 @@ function App() {
                 </div>}
             </div>}
           </article>)}
-          {activity && <div className="agent-activity" role="status">
-            <LoaderCircle size={16} aria-hidden="true"/><span>{activity}</span>
-          </div>}
+          {activity && <AgentActivity status={activity} steps={workspace?.agentSteps || []}/>}
           {pending && <section className="message agent-question approval-card" aria-label="Edit approval">
             <h3><ShieldCheck size={16} aria-hidden="true"/> Approve proposed edits?</h3>
             <p>Review the files Codex wants to edit in the draft.</p>
@@ -508,17 +838,17 @@ function App() {
               <ChevronDown className="agent-settings-chevron" size={14} aria-hidden="true"/>
             </summary>
             <div className="agent-settings-fields">
-              <label>Model<select value={model} disabled={!!busy || modelStatus !== 'ready'} onChange={event=>{setModel(event.target.value);setReasoningEffort('');}}>
+              <label>Model<Select value={model} disabled={!!busy || modelStatus !== 'ready'} onChange={event=>{setModel(event.target.value);setReasoningEffort('');}}>
                 <option value="">Codex default</option>
                 {models.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}
-              </select></label>
-              <label>Reasoning<select value={reasoningEffort} disabled={!!busy} onChange={event=>setReasoningEffort(event.target.value)}>
+              </Select></label>
+              <label>Reasoning<Select value={reasoningEffort} disabled={!!busy} onChange={event=>setReasoningEffort(event.target.value)}>
                 <option value="">Model default</option>
-                {(selectedModel?.efforts || ['low','medium','high','xhigh']).map(effort=><option key={effort} value={effort}>{effort}</option>)}
-              </select></label>
-              <label className="agent-settings-approvals">Ask before editing<select value={editApproval} disabled={!!busy} onChange={event=>setEditApproval(event.target.value)}>
+                {(selectedModel?.efforts || ['low','medium','high','xhigh']).map(effort=><option key={effort} value={effort}>{effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)}</option>)}
+              </Select></label>
+              <label className="agent-settings-approvals">Ask before editing<Select value={editApproval} disabled={!!busy} onChange={event=>setEditApproval(event.target.value)}>
                 <option value="shared">Shared components</option><option value="all">Every draft edit</option>
-              </select></label>
+              </Select></label>
               <div className="agent-model-status" role="status">
                 {modelStatus === 'loading' && <p>Loading models…</p>}
                 {modelStatus === 'unsupported' && <p>Restart Open Studio and reload this page to load model choices.</p>}
@@ -529,7 +859,7 @@ function App() {
           </details>}
           <div className="composer-input">
             <label htmlFor="prompt">Message Codex</label>
-            <SkillPrompt value={prompt} onChange={setPrompt} loadSkills={loadSkills}/>
+            <SkillPrompt key={sessionId} value={prompt} onChange={setPrompt} loadSkills={loadSkills}/>
             <div className="composer-toolbar">
               <span id="composer-hint">{composerHint || <><kbd>\</kbd> Skills <span aria-hidden="true">·</span> <kbd>Ctrl</kbd> + <kbd>Enter</kbd> Send</>}</span>
               <button className="send" type="submit" aria-label="Send to Codex" disabled={!!composerHint || !prompt.trim()}><ArrowUp size={19}/></button>

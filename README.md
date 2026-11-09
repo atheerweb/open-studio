@@ -18,7 +18,13 @@ Import copies the frontend source first. Preview startup links the project's ins
 
 Use **Select element** in the preview toolbar, then click an element. Studio uses Vue's development metadata to find the owning component when available. Use Explorer to select a file manually. In **Page agent**, approve sharing draft context and messages with Codex, then discuss a change or request an installed skill such as `$brainstorming`. The agent can prepare changes across several files. For shared-component edits, Studio lists the routes it can trace and waits for approval.
 
-Check the live preview, open **Diff**, and review the files you plan to publish. If Studio flags a conflict, use **Resolve conflict** to merge the draft with the current original or keep the original. Confirm your review and select **Publish to original folder** to apply the changes. Closing the draft stops its dev server. Import the same folder later to resume the draft and chat.
+Open **Source Control** or **Diff** to browse staged, unstaged, and untracked files in the imported folder. Select a file to open its diff in the editor. To apply private draft edits, check the live preview and open **Publish** to review the files. If Studio flags a conflict, use **Resolve conflict** to merge the draft with the current original or keep the original. Confirm your review and select **Publish to original folder** to apply the changes. Closing the draft stops its dev server. Import the same folder later to resume the draft and chat.
+
+## Signal design system
+
+Open Studio uses warm graphite surfaces with lime for the current file, focused controls, and primary actions. Git additions use fern, deletions use rose, and warnings use amber. File status letters, line markers, and focus outlines make those states readable without relying on color alone.
+
+`src/theme.css` is the source of truth. Palette values feed semantic roles such as `--ground`, `--accent`, and `--success`. The editor and file selectors use component tokens that inherit those roles. Use the shared UI and code fonts, spacing, and radii for new controls. Keep the browser chrome color in `index.html` aligned with the shell token.
 
 ## How it works
 

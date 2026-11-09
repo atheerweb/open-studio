@@ -1,11 +1,44 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
-import { lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { askCodex } from '../server/codex.mjs';
 import { createStudio } from '../server/studio.mjs';
 import { VueDraft } from '../server/vue-draft.mjs';
+import { bridgeFile } from '../server/draft-publish.mjs';
+
+test('preview startup rejects blocked HTTP ports before preparing dependencies', async () => {
+  const draft = new VueDraft('unused','unused');
+  draft.prepareDependencies = async () => assert.fail('Preview setup should not start');
+  await assert.rejects(draft.start(6000), /port 6000 is blocked.*5174/i);
+  assert.equal(draft.state,'imported');
+});
+
+test('starting a saved preview only replaces the route bridge when its contents change', async () => {
+  const directory = await mkdtemp(join(tmpdir(),'open-studio-bridge-'));
+  try {
+    const draft = new VueDraft(directory,directory);
+    const origin = 'http://localhost:4173';
+    const bridge = join(directory,bridgeFile);
+    await writeFile(join(directory,'index.html'),'<head></head>');
+    await draft.installBridge(origin);
+    await utimes(bridge,1,1);
+    const {mtimeMs} = await lstat(bridge);
+
+    await draft.installBridge(origin);
+    assert.equal((await lstat(bridge)).mtimeMs,mtimeMs);
+
+    await draft.installBridge('http://localhost:4174');
+    assert.match(await readFile(bridge,'utf8'),/http:\/\/localhost:4174/);
+    await rm(bridge);
+    await draft.installBridge('http://localhost:4174');
+    assert.match(await readFile(bridge,'utf8'),/http:\/\/localhost:4174/);
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});
 
 test('the folder picker returns a local selection and handles cancellation', async () => {
   const folder = join(tmpdir(),'Vue project');
@@ -86,6 +119,26 @@ test('page chat checks consent, resolves the route and edits only the draft', as
   try {
     assert.equal((await call('import',{folder:root},'https://elsewhere.test')).status,403);
     assert.equal((await call('import',{folder:root})).status,200);
+    assert.deepEqual(await (await call('git-diff')).json(),{available:false});
+    const git = (...args) => execFileSync('git',args,{cwd:root,stdio:'pipe'});
+    git('init');
+    git('add','--','src/Dashboard.vue');
+    await writeFile(original,'<template>Working tree</template>');
+    await writeFile(join(root,'untracked.txt'),'New file');
+    const gitChanges = await (await call('git-diff')).json();
+    assert.equal(gitChanges.available,true);
+    assert.equal(gitChanges.staged[0].path,'src/Dashboard.vue');
+    assert.equal(gitChanges.staged[0].status,'A');
+    const staged = await (await call('git-file',{group:'staged',path:'src/Dashboard.vue'})).json();
+    assert.match(staged.patch,/\+<template>Before<\/template>/);
+    assert.equal(gitChanges.unstaged[0].path,'src/Dashboard.vue');
+    assert.equal(gitChanges.unstaged[0].status,'M');
+    const unstaged = await (await call('git-file',{group:'unstaged',path:'src/Dashboard.vue'})).json();
+    assert.match(unstaged.patch,/\+<template>Working tree<\/template>/);
+    assert.ok(gitChanges.untracked.includes('untracked.txt'));
+    assert.deepEqual(await (await call('git-file',{group:'untracked',path:'untracked.txt'})).json(),{text:'New file'});
+    assert.equal((await call('git-file',{group:'unstaged',path:'../outside'})).status,400);
+    await writeFile(original,'<template>Before</template>');
     assert.deepEqual(await (await call('resolve',{route:'/dashboard'})).json(),{file:'src/Dashboard.vue'});
     const prompt = {route:'/dashboard',prompt:'Update heading',file:'../outside.vue'};
     assert.equal((await call('chat',prompt)).status,403);
@@ -97,6 +150,62 @@ test('page chat checks consent, resolves the route and edits only the draft', as
   } finally {
     await app.closeWorkspace();
     await new Promise(resolve=>app.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('agent sessions isolate Codex history and restore the selected session on reopen', async () => {
+  const root = await mkdtemp(join(tmpdir(),'open-studio-test-'));
+  const source = join(root,'source');
+  const store = join(root,'drafts');
+  const threads = [];
+  const app = createStudio({store,runAgent:async ({threadId,emit}) => {
+    threads.push(threadId);
+    emit({type:'thread.started',thread_id:threadId || 'new-thread'});
+    return {message:'Reply',edits:[]};
+  }});
+  try {
+    await mkdir(join(source,'src'),{recursive:true});
+    await writeFile(join(source,'package.json'),JSON.stringify({scripts:{dev:'vite'},dependencies:{vue:'fixture'}}));
+    await writeFile(join(source,'src','App.vue'),'<template>Before</template>');
+    const legacy = await VueDraft.open(source,store);
+    await legacy.close();
+    const metadata = JSON.parse(await readFile(legacy.metadata,'utf8'));
+    delete metadata.sessions;
+    delete metadata.activeSessionId;
+    await writeFile(legacy.metadata,JSON.stringify({...metadata,threadId:'legacy-thread',
+      messages:[{author:'You',text:'Earlier message',route:'/'}]}));
+
+    await new Promise((resolve,reject)=>app.once('error',reject).listen(0,'127.0.0.1',resolve));
+    const origin = 'http://127.0.0.1:' + app.address().port;
+    const request = (action, data) => fetch(origin+'/api/vue',{method:'POST',
+      headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({action,...data})});
+    const call = async (action, data) => {
+      const response = await request(action,data);
+      const body = await response.json();
+      assert.equal(response.status,200,body.error);
+      return body.workspace;
+    };
+    const first = await call('import',{folder:source});
+    const second = await call('agent-session',{sessionId:null});
+    assert.equal(second.sessions.length,2);
+    assert.notEqual(second.activeSessionId,first.activeSessionId);
+    assert.deepEqual(second.messages,[]);
+    assert.equal((await request('agent-session',{sessionId:'missing'})).status,404);
+    assert.equal((await request('agent-turn',{sessionId:first.activeSessionId,route:'/',prompt:'Stale',approved:true})).status,409);
+    await call('agent-turn',{sessionId:second.activeSessionId,route:'/',prompt:'New message',approved:true});
+    await call('close');
+    const reopened = await call('import',{folder:source});
+    assert.equal(reopened.activeSessionId,second.activeSessionId);
+    assert.deepEqual(reopened.messages.map(message=>message.text),['New message','Reply']);
+    await call('agent-turn',{sessionId:second.activeSessionId,route:'/',prompt:'Continue',approved:true});
+    const restored = await call('agent-session',{sessionId:first.activeSessionId});
+    assert.deepEqual(restored.messages.map(message=>message.text),['Earlier message']);
+    await call('agent-turn',{sessionId:first.activeSessionId,route:'/',prompt:'Resume',approved:true});
+    assert.deepEqual(threads,[undefined,'new-thread','legacy-thread']);
+  } finally {
+    await app.closeWorkspace();
+    if (app.listening) await new Promise(resolve=>app.close(resolve));
     await rm(root,{recursive:true,force:true});
   }
 });
@@ -263,6 +372,9 @@ test('a running preview can review and publish agent edits through the Studio AP
       model:'gpt-fixture',reasoningEffort:'high',editApproval:'all'});
     const pending = (await call('status')).workspace.pendingEdit;
     assert.deepEqual(pending.files,[file,'src/page.css']);
+    const blocked = await fetch(url+'/api/vue',{method:'POST',headers:{Origin:url,'Content-Type':'application/json'},
+      body:JSON.stringify({action:'agent-session',sessionId:null})});
+    assert.equal(blocked.status,409);
     assert.deepEqual((await call('review')).changes,[]);
     await call('agent-approval',{id:pending.id,approved:true});
     const review = await call('review');

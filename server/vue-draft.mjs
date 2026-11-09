@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse } from 'node:path';
@@ -10,6 +10,12 @@ import { atomicWrite, bridgeFile, bridgeTag, fingerprint, projectFolders as fold
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const windows = process.platform === 'win32';
+// HTTP ports in the Fetch blocklist within the supported preview range.
+// https://fetch.spec.whatwg.org/#port-blocking
+const blockedPreviewPorts = new Set([
+  1719,1720,1723,2049,3659,4045,4190,5060,5061,6000,6566,
+  6665,6666,6667,6668,6669,6679,6697,10080
+]);
 
 const copyOptions = {
   recursive:true,
@@ -73,10 +79,13 @@ export class VueDraft {
       draft.name = basename(source);
       draft.projectBaseline = saved?.baseline || await recordBaseline(directory);
       draft.bridgeOrigin = saved?.bridgeOrigin;
-      draft.threadId = saved?.threadId;
-      draft.messages = saved?.messages || [];
+      if (saved?.sessions?.length) {
+        draft.sessions = saved.sessions;
+        draft.activeSession = draft.sessions.find(session => session.id === saved.activeSessionId) || draft.sessions[0];
+      } else if (saved) {
+        Object.assign(draft.activeSession,{threadId:saved.threadId,messages:saved.messages || [],lastDecision:saved.lastDecision});
+      }
       draft.pendingEdit = saved?.pendingEdit;
-      draft.lastDecision = saved?.lastDecision;
       draft.lastAgentEdits = saved?.lastAgentEdits;
       draft.dependenciesReady = Boolean(saved && await lstat(join(directory,'node_modules','vite','bin','vite.js')).catch(() => null));
       await draft.refreshFiles();
@@ -125,8 +134,8 @@ export class VueDraft {
   async saveState(metadata = this.metadata, baseline = this.projectBaseline) {
     if (!metadata) return;
     await atomicWrite(metadata,JSON.stringify({directory:this.directory,baseline,
-      bridgeOrigin:this.bridgeOrigin,threadId:this.threadId,messages:this.messages,
-      pendingEdit:this.pendingEdit,lastDecision:this.lastDecision,lastAgentEdits:this.lastAgentEdits}));
+      bridgeOrigin:this.bridgeOrigin,sessions:this.sessions,activeSessionId:this.activeSession.id,
+      pendingEdit:this.pendingEdit,lastAgentEdits:this.lastAgentEdits}));
   }
 
   async updateBaseline(baseline) {
@@ -150,7 +159,31 @@ export class VueDraft {
     this.logs = '';
     this.state = 'imported';
     this.writePending = false;
-    this.messages = [];
+    this.activeSession = {id:randomUUID(),messages:[]};
+    this.sessions = [this.activeSession];
+  }
+
+  get messages() { return this.activeSession.messages; }
+  get threadId() { return this.activeSession.threadId; }
+  set threadId(value) { this.activeSession.threadId = value; }
+  get lastDecision() { return this.activeSession.lastDecision; }
+  set lastDecision(value) { this.activeSession.lastDecision = value; }
+
+  async selectSession(session) {
+    const previous = this.activeSession;
+    const sessions = this.sessions;
+    if (!session) {
+      session = {id:randomUUID(),messages:[]};
+      this.sessions = [...sessions,session];
+    }
+    this.activeSession = session;
+    try {
+      await this.saveState();
+    } catch (error) {
+      this.activeSession = previous;
+      this.sessions = sessions;
+      throw error;
+    }
   }
 
   get files() {
@@ -165,15 +198,44 @@ export class VueDraft {
     const entry = join(this.directory, 'index.html');
     const html = await readFile(entry, 'utf8');
     if (!/<\/head\s*>/i.test(html)) throw new Error('The preview index.html needs a closing head tag.');
-    const script = join(this.directory, bridgeFile);
+    const script = await safeFile(this.directory,bridgeFile);
+    const bridge = routeBridge(origin);
     await mkdir(dirname(script), {recursive:true});
     if (this.bridgeOrigin && html.includes(bridgeTag)) {
-      await atomicWrite(script,routeBridge(origin));
+      const current = await readFile(script,'utf8').catch(error => {
+        if (error.code !== 'ENOENT') throw error;
+        return null;
+      });
+      if (current === null) {
+        await writeFile(script,bridge,{flag:'wx'});
+      } else if (current !== bridge) {
+        try {
+          await atomicWrite(script,bridge);
+        } catch (error) {
+          if (!windows || error.syscall !== 'rename' ||
+              !['EPERM','EACCES','EBUSY'].includes(error.code)) throw error;
+          // This generated file can be rewritten when Windows denies replacement.
+          const handle = await open(await safeFile(this.directory,bridgeFile),'r+');
+          try {
+            await handle.writeFile(bridge);
+            await handle.truncate(Buffer.byteLength(bridge));
+          } finally {
+            await handle.close();
+          }
+        }
+      }
+      if (this.bridgeOrigin === origin) return;
+      const previousOrigin = this.bridgeOrigin;
       this.bridgeOrigin = origin;
-      await this.saveState();
+      try {
+        await this.saveState();
+      } catch (error) {
+        this.bridgeOrigin = previousOrigin;
+        throw error;
+      }
       return;
     }
-    await writeFile(script, routeBridge(origin), {flag:'wx'});
+    await writeFile(script, bridge, {flag:'wx'});
     try {
       await writeFile(entry, html.replace(/<\/head\s*>/i,
         bridgeTag + '$&'));
@@ -234,6 +296,7 @@ export class VueDraft {
 
   async start(port = 5173) {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Choose a preview port between 1024 and 65535.');
+    if (blockedPreviewPorts.has(port)) throw new Error('Preview port ' + port + ' is blocked for HTTP. Choose another port, such as 5174.');
     if (this.child || this.state === 'starting') throw new Error('A draft preview is already running or starting.');
     this.state = 'starting';
     try {
@@ -242,11 +305,11 @@ export class VueDraft {
         check.once('error', () => reject(new Error('Preview port ' + port + ' is unavailable. Choose a different port.')));
         check.listen(port, 'localhost', () => check.close(resolve));
       });
-      await this.prepareDependencies();
+      const previewArgs = await this.prepareDependencies() || [];
       this.logs = '';
       this.url = 'http://localhost:' + port;
-      const args = ['run','dev','--','--host','localhost','--port',String(port),'--strictPort'];
-      const child = spawn(windows ? 'npm.cmd ' + args.join(' ') : 'npm', windows ? [] : args, {
+      const args = ['run','dev','--','--host','localhost','--port',String(port),'--strictPort',...previewArgs];
+      const child = spawn(windows ? 'npm.cmd ' + args.map(arg => '"' + arg + '"').join(' ') : 'npm', windows ? [] : args, {
         cwd:this.directory, shell:windows, windowsHide:true, detached:!windows,
         stdio:['ignore','pipe','pipe']
       });

@@ -4,9 +4,27 @@ import { posix } from 'node:path';
 import { atomicWrite, bridgeTag, editableFile, safeFile } from './draft-publish.mjs';
 import { runCodexSession } from './codex.mjs';
 
-function addMessage(draft,author,text,route,question) {
-  draft.messages.push({author,text:text.slice(0,16000),route,...(question && {question})});
+function addMessage(draft,author,text,route,question,activity) {
+  draft.messages.push({author,text:text.slice(0,16000),route,...(question && {question}),
+    ...(activity?.length && {activity})});
   if (draft.messages.length > 200) draft.messages.shift();
+}
+
+function recordAgentStep(steps,{type,item}) {
+  if (!['item.started','item.updated','item.completed'].includes(type) || typeof item?.id !== 'string') return;
+  const previous = steps.get(item.id);
+  const kind = item.type === 'command_execution' ? 'command' : item.type === 'mcp_tool_call' ? 'tool' : null;
+  if (!kind) return;
+  const detail = kind === 'command' ? item.command
+    : [item.server,item.tool].filter(value => typeof value === 'string' && value).join(' / ');
+  const exitCode = Number.isInteger(item.exit_code) ? item.exit_code : previous?.exitCode;
+  const state = item.status === 'failed' || (exitCode != null && exitCode !== 0) ? 'failed'
+    : type === 'item.completed' || item.status === 'completed' ? 'completed' : 'running';
+  steps.set(item.id,{id:item.id,kind,
+    detail:typeof detail === 'string' && detail.trim() ? detail.slice(0,1000) : previous?.detail,
+    state,...(exitCode != null && {exitCode})});
+  if (steps.size > 30) steps.delete(steps.keys().next().value);
+  return [...steps.values()];
 }
 
 async function rawFile(draft,file) {
@@ -19,6 +37,31 @@ async function rawFile(draft,file) {
   const text = bytes.toString('utf8');
   if (text.includes('\0') || !Buffer.from(text).equals(bytes)) throw new Error('Codex can only edit UTF-8 text: ' + file);
   return text;
+}
+
+function replaceDraftText(file,current,find,replace) {
+  if (!find || current === null || replace === null) {
+    throw new Error('Codex proposed an edit that does not match ' + file + '. Re-read the draft and try again.');
+  }
+  let start = current.indexOf(find);
+  let matched = find;
+  let ambiguous = start >= 0 && current.indexOf(find,start + 1) >= 0;
+  if (start < 0 && find.includes('\n')) {
+    const pattern = find.split(/\r?\n/).map(line => RegExp.escape(line)).join('\\r?\\n');
+    const matcher = new RegExp(pattern,'g');
+    const match = matcher.exec(current);
+    if (match) {
+      start = match.index;
+      matched = match[0];
+      const lineEnding = matched.match(/\r?\n/)[0];
+      replace = replace.replace(/\r?\n/g,lineEnding);
+      matcher.lastIndex = start + (matched.startsWith('\r\n') ? 2 : 1);
+      ambiguous = matcher.test(current);
+    }
+  }
+  if (ambiguous) throw new Error('The proposed edit matches more than once in ' + file + '. Include more surrounding text and try again.');
+  if (start < 0) throw new Error('Codex proposed an edit that does not match ' + file + '. Re-read the draft and try again.');
+  return current.slice(0,start) + replace + current.slice(start + matched.length);
 }
 
 async function prepareEdits(draft,edits) {
@@ -37,13 +80,7 @@ async function prepareEdits(draft,edits) {
     let after;
     if (find === null && current === null && replace !== null) after = replace;
     else if (replace === null && find !== null && current === find && !withBridge) after = null;
-    else {
-      const start = find && current?.indexOf(find);
-      if (!find || start == null || start < 0 || replace === null || current.indexOf(find,start + 1) >= 0) {
-        throw new Error('Codex proposed an edit that does not match ' + file + '. Try again.');
-      }
-      after = current.slice(0,start) + replace + current.slice(start + find.length);
-    }
+    else after = replaceDraftText(file,current,find,replace);
     if (after !== null && Buffer.byteLength(after) > 524288) throw new Error('Codex returned a file over 512 KiB.');
     if (withBridge && !/<\/head\s*>/i.test(after)) throw new Error('Keep the closing head tag in index.html.');
     files.set(file,{file,before:raw,after});
@@ -109,6 +146,10 @@ export async function runDraftTurn(draft,input,run = runCodexSession) {
   const {route,file,element,prompt,model,reasoningEffort,editApproval} = input;
   addMessage(draft,'You',prompt,route);
   draft.agentActivity = 'Starting Codex…';
+  const steps = new Map();
+  draft.agentSteps = [];
+  const finishedSteps = () => draft.agentSteps.map(step => step.state === 'running'
+    ? {...step,state:'interrupted'} : step);
   try {
     const response = await run({
       cwd:draft.directory,threadId:draft.threadId,model,reasoningEffort,
@@ -127,11 +168,15 @@ export async function runDraftTurn(draft,input,run = runCodexSession) {
       ].join('\n'),
       emit:event => {
         if (event.type === 'thread.started' && typeof event.thread_id === 'string') draft.threadId = event.thread_id;
+        const updated = recordAgentStep(steps,event);
+        if (updated) draft.agentSteps = updated;
+        if (event.type === 'turn.started') draft.agentActivity = 'Working…';
         if (event.type === 'item.started' || event.type === 'item.updated') {
           const item = event.item;
           const labels = {command_execution:'Running a command',reasoning:'Thinking',mcp_tool_call:'Using a tool',agent_message:'Writing a response'};
           if (labels[item?.type]) draft.agentActivity = labels[item.type] + '…';
         }
+        if (event.type === 'item.completed' && updated) draft.agentActivity = 'Working…';
       }
     });
     if (typeof response?.message !== 'string' || !response.message.trim()) throw new Error('Codex returned an empty response.');
@@ -152,12 +197,13 @@ export async function runDraftTurn(draft,input,run = runCodexSession) {
     }
     draft.lastDecision = question ? 'Awaiting clarification' : needsApproval ? 'Awaiting approval'
       : edits.length ? 'Changes applied to the draft' : 'No edits';
-    addMessage(draft,'Codex',response.message,route,question);
+    addMessage(draft,'Codex',response.message,route,question,finishedSteps());
   } catch (error) {
-    addMessage(draft,'Studio',error.message,route);
+    addMessage(draft,'Studio',error.message,route,null,finishedSteps());
     throw error;
   } finally {
     draft.agentActivity = null;
+    draft.agentSteps = [];
     await draft.saveState();
   }
 }
