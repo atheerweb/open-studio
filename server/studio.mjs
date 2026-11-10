@@ -9,9 +9,10 @@ import { chooseFrontendFolder } from './folder-picker.mjs';
 import { VueDraft } from './vue-draft.mjs';
 import { LiveWorkspace } from './live-workspace.mjs';
 import { readGitDiff } from './git-diff.mjs';
-import { changeGitWorkspace, gitWorkspace, readGitWorkspace, suggestGitMessage } from './git-actions.mjs';
+import { changeGitWorkspace, gitWorkspace, readGitWorkspace, readLocalCommitFile, suggestGitMessage } from './git-actions.mjs';
 import { browseMySql } from './mysql-browser.mjs';
 import { applyPageEdit } from './vue-page.mjs';
+import { openArchitecture } from './architecture.mjs';
 import { approveDraftTurn, componentUsage, runDraftTurn, undoDraftTurn } from './draft-agent.mjs';
 
 const dist = new URL('../dist/',import.meta.url);
@@ -77,11 +78,13 @@ function chatExcerpt(text = '',limit) {
 
 export function createStudio({ask = askCodex, runAgent, store, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
   let draft;
+  let architecture;
   let activeOperation;
   let closing = false;
   const summary = () => draft ? {
     name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
     live:!!draft.live,canPreview:draft.live ? draft.canPreview : true,
+    ...(architecture && {architecture:true}),
     dependencyProgress:draft.dependencyProgress,dependencyFallback:draft.dependencyFallback,
     activeSessionId:draft.activeSession.id,
     sessions:draft.sessions.map(({id,messages},index) => ({
@@ -159,6 +162,21 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       }
       if (closing) throw error(503,'Open Studio is shutting down.');
       if (input?.action === 'database') return send(200,await browseMySql(input.connection,input.table,input.update));
+      if (['architecture-status','architecture-refresh','architecture-source','architecture-terminal','architecture-ai'].includes(input?.action)) {
+        if (!architecture) throw error(409,'Open a Laravel folder or a project with a saved Understand Anything graph.');
+        if (input.action === 'architecture-source') {
+          const source = await architecture.read(input.source);
+          if (!source) throw error(404,'Source evidence is no longer available.');
+          return send(200,source);
+        }
+        if (input.action === 'architecture-terminal') return send(200,{command:await architecture.terminalCommand()});
+        if (input.action === 'architecture-ai') {
+          if (input.enabled !== false && input.approved !== true) throw error(403,'Approve sharing project source with Codex first.');
+          await architecture.enableAI(input.enabled !== false);
+        }
+        if (input.action === 'architecture-refresh') architecture.refresh({retry:true});
+        return send(200,architecture.status());
+      }
       if (activeOperation) {
         if (activeOperation.action !== 'agent-turn' || !agentInspectionActions.has(input?.action)) {
           throw error(409,'The workspace is busy. Try again.');
@@ -173,6 +191,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       if (['open','import'].includes(input?.action)) {
         if (draft) throw error(409,'Close the current project before opening another folder.');
         draft = await (input.action === 'open' ? LiveWorkspace : VueDraft).open(input.folder,store);
+        if (draft.live) architecture = await openArchitecture(draft.source,store);
       } else {
         if (!draft) throw error(409,'Import a Vue folder first.');
         switch (input?.action) {
@@ -237,10 +256,14 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             const {group,path,previousPath} = input;
             const validPath = value => typeof value === 'string' &&
               value.split('/').every(part => part && part !== '.' && part !== '..' && !/[\\:\0]/.test(part));
-            if (!['staged','unstaged','untracked'].includes(group) || !validPath(path) ||
+            if (!['staged','unstaged','untracked','committed'].includes(group) || !validPath(path) ||
                 (previousPath != null && !validPath(previousPath))) throw error(400,'Choose a changed project file.');
             const root = draft.live ? (await gitWorkspace(draft.source)).root : draft.source;
             if (!root) throw error(400,'Open a Git working tree first.');
+            if (group === 'committed') {
+              if (!draft.live) throw error(409,'Open the original project to review local commits.');
+              return send(200,await readLocalCommitFile(root,path,input.localCommitRange));
+            }
             return send(200,await readGitDiff(root,{group,path,previousPath}));
           }
           case 'git-generate-message':
@@ -249,10 +272,16 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             return send(200,await suggestGitMessage(draft.source,ask));
           case 'git-switch':
           case 'git-pull':
+          case 'git-merge-upstream':
+          case 'git-abort-merge':
+          case 'git-discard':
             if (!draft.live) throw error(409,'Open the original project before running Git actions.');
-            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before switching or pulling.');
+            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before changing the working tree.');
+            if (input.action === 'git-discard' && input.approved !== true) throw error(403,'Confirm the discard first.');
+            if (input.action === 'git-abort-merge' && input.approved !== true) throw error(403,'Confirm that you want to abort the merge.');
             try {
               await changeGitWorkspace(draft.source,input);
+              if (['git-switch','git-pull','git-merge-upstream'].includes(input.action)) architecture?.refresh();
             } finally {
               await draft.refreshFiles();
             }
@@ -266,6 +295,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'git-push':
             if (!draft.live) throw error(409,'Open the original project before running Git actions.');
             await changeGitWorkspace(draft.source,input);
+            if (['git-commit-and-push','git-push'].includes(input.action)) architecture?.refresh();
             return send(200,{ok:true});
           case 'review': return send(200,await draft.review());
           case 'resolve-conflict':
@@ -280,6 +310,8 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             break;
           case 'close':
             await draft.close();
+            await architecture?.close();
+            architecture = undefined;
             draft = undefined;
             break;
           default: throw error(400,'Unknown workspace action.');
@@ -298,6 +330,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
   server.closeWorkspace = async () => {
     closing = true;
     await activeOperation?.done;
+    await architecture?.close();
     await draft?.close();
   };
   return server;

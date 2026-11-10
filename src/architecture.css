@@ -1,0 +1,99 @@
+.architecture-panel {
+  container-type: inline-size;
+  flex: 1;
+  min-width: 0;
+  padding: 20px;
+  background: var(--ground);
+}
+.architecture-panel[hidden] { display: none; }
+.architecture-panel h2, .architecture-panel h3 { margin: 0; }
+.architecture-panel h3 { font-size: 14px; }
+.architecture-panel p { margin: 5px 0 0; color: var(--muted); }
+.arch-toolbar, .arch-actions, .arch-tabs, .arch-module-list, .arch-lifecycle-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.arch-toolbar, .arch-lifecycle-header { justify-content: space-between; }
+.arch-toolbar h2 { font-size: 20px; }
+.arch-tabs { margin: 18px 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.architecture-panel .quiet { min-height: 36px; }
+.architecture-panel button[aria-pressed=true] { color: var(--accent); background: var(--accent-light); border-color: var(--accent-border); }
+.arch-workspace { display: grid; grid-template-columns: minmax(0,1fr) minmax(220px,32%); gap: 12px; }
+.arch-diagram, .arch-evidence {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+}
+.arch-evidence { align-self: start; overflow-wrap: anywhere; }
+.arch-evidence strong { display: block; margin-top: 10px; }
+.arch-evidence pre {
+  margin: 10px 0 0;
+  overflow: auto;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--shell);
+  font: 12px/1.6 var(--font-code);
+}
+.arch-evidence pre span { display: block; min-width: max-content; padding-right: 8px; }
+.arch-evidence pre span[data-highlight=true] { background: var(--accent-light); }
+.arch-evidence pre i { display: inline-block; width: 4ch; margin-right: 8px; text-align: right; color: var(--muted); font-style: normal; }
+.arch-source-path, .arch-terminal input { font-family: var(--font-code); font-size: 12px; }
+.arch-terminal { margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); }
+.arch-terminal input, .arch-select select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--shell);
+  color: var(--ink);
+}
+.arch-terminal input { margin-top: 8px; }
+.architecture-panel .arch-error { color: var(--error); }
+.architecture-panel .arch-warning { color: var(--warning); }
+.arch-overview { display: block; width: 100%; max-height: 365px; margin-bottom: 10px; color: var(--accent); }
+.arch-overview line { stroke: var(--border); stroke-width: 1; }
+.arch-overview line[data-focus=true] { stroke: var(--accent-border); stroke-width: 1.6; }
+.arch-overview circle { fill: var(--soft); stroke: var(--border-strong); }
+.arch-overview g[data-focus=true] circle { fill: var(--accent); stroke: var(--accent); }
+.arch-overview text { fill: var(--ink); paint-order: stroke; stroke: var(--panel); stroke-width: 3px; font-size: 12px; }
+.arch-module-graph { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 10px; align-items: start; margin-top: 16px; }
+.arch-files { margin-top: 16px; }
+.arch-files summary { cursor: pointer; margin-bottom: 8px; }
+.arch-lane, .arch-transition-list { display: grid; gap: 6px; min-width: 0; }
+.arch-node, .arch-edge {
+  min-height: 40px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--paper);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.arch-node:hover, .arch-edge:hover { border-color: var(--accent-border); background: var(--soft); }
+.arch-node { display: grid; gap: 3px; }
+.arch-focus { color: var(--accent); border-color: var(--accent-border); background: var(--accent-light); }
+.arch-edge { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 8px; }
+.arch-edge-label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.architecture-panel small { color: var(--muted); font-weight: 400; }
+.arch-select { display: grid; gap: 5px; margin-bottom: 12px; max-width: 420px; }
+.arch-flow { display: grid; gap: 3px; padding: 0; margin: 12px 0; list-style: none; }
+.arch-flow li { display: grid; justify-items: start; gap: 3px; }
+.arch-flow-arrow { color: var(--muted); margin-left: 16px; }
+.arch-transition-list { margin: 7px 0 14px; }
+.arch-system-core { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.arch-system-links { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,165px),1fr)); gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+@container (max-width: 820px) {
+  .arch-module-graph { grid-template-columns: 1fr; }
+  .arch-module-graph > .arch-focus { grid-row: 1; justify-self: start; }
+}
+@container (max-width: 620px) {
+  .arch-workspace { grid-template-columns: 1fr; }
+}

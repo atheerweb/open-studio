@@ -2,41 +2,48 @@ import React, {lazy, Suspense, useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {
   ArrowDown, ArrowRight, ArrowUp, ArrowUpRight, Check, ChevronDown, ChevronRight, Code2, Command, FileCode2, Folder, FolderOpen,
-  Database, Files, GitBranch, GitCompareArrows, Globe2, History, MessageCircle, Monitor, MousePointer2, PanelRight, RefreshCw, SlidersHorizontal,
+  Database, Files, GitBranch, GitCompareArrows, Globe2, History, MessageCircle, Monitor, MousePointer2, Network, PanelRight, RefreshCw, SlidersHorizontal,
   Activity, CircleHelp, LoaderCircle, Minus, Play, Plus, Search, ShieldCheck, Smartphone, Sparkles, Square, Terminal, Undo2, Wrench, X
 } from 'lucide-react';
 import './studio.css';
 import {DatabasePanel} from './database-panel.jsx';
+import {ArchitecturePanel} from './architecture-panel.jsx';
 import {SkillPrompt} from './skill-prompt.jsx';
 import {Select} from './select.jsx';
 
 const SourceEditor = lazy(() => import('./source-editor.jsx'));
 
-const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked']];
+const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked'],['committed','Local Commit Changes']];
 const gitStatusNames = {A:'Added',M:'Modified',D:'Deleted',R:'Renamed',C:'Copied',T:'Type changed',U:'Conflict','?':'Untracked'};
 
 function gitFiles(result,group) {
   if (!result?.available) return [];
+  if (group === 'committed') return (result.committed || []).map(file=>({...file,localCommitRange:result.localCommitRange}));
   return group === 'untracked' ? result.untracked.map(path=>({path,status:'?'})) : result[group];
 }
 
 const generatingCommitMessage = 'Generating commit message…';
 
-function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,message,setMessage,messageError,busy,locked,live,branchBlock}) {
+function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,message,setMessage,messageError,busy,locked,live,worktreeBlock}) {
   const [actionsOpen,setActionsOpen] = useState(false);
   const actionsButton = useRef(null);
   const messageInput = useRef(null);
   const staged = gitFiles(result,'staged');
   const changes = ['unstaged','untracked'].flatMap(group=>gitFiles(result,group).map(file=>({...file,group})));
-  const canCommit = !locked && !!message.trim() && staged.length > 0;
-  const canPush = !locked && !!result?.branch && result.hasRemote;
+  const committed = gitFiles(result,'committed');
+  const hasConflicts = staged.some(file=>file.status === 'U');
+  const canCommit = !locked && !!message.trim() && !hasConflicts && (staged.length > 0 || result?.mergeInProgress);
+  const canPush = !locked && !!result?.branch && result.hasRemote && !result.mergeInProgress;
   const localBranches = result?.branches?.local || [];
   const remoteBranches = result?.branches?.remote || [];
   const currentRef = localBranches.includes(result?.branch) ? 'refs/heads/' + result.branch : '';
-  const branchLocked = locked || Boolean(branchBlock);
+  const worktreeLocked = locked || Boolean(worktreeBlock);
   const generating = busy === generatingCommitMessage;
   const shortcut = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
-  const messageHint = generating ? generatingCommitMessage : !staged.length ? 'Stage changes to commit or generate a message.'
+  const messageHint = generating ? generatingCommitMessage
+    : hasConflicts ? 'Resolve and stage the conflicting files.'
+    : result?.mergeInProgress ? 'Enter a message to finish the merge.'
+    : !staged.length ? 'Stage changes to commit or generate a message.'
     : 'The sparkle sends your staged diff to Codex.';
   return <>
     <div className="panel-label"><span>SOURCE CONTROL</span>
@@ -49,7 +56,7 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
       <div className="scm-branch">
         <GitBranch size={15} aria-hidden="true"/>
         <Select aria-label="Switch Git branch" value={currentRef} title={result.branch || 'Detached HEAD'}
-          disabled={branchLocked || localBranches.length + remoteBranches.length === 0}
+          disabled={worktreeLocked || result.mergeInProgress || localBranches.length + remoteBranches.length === 0}
           onChange={event=>onAction('git-switch',{ref:event.target.value})}>
           {!currentRef && <option value="" disabled>{result.branch || 'Detached HEAD'}</option>}
           {localBranches.length > 0 && <optgroup label="Local branches">
@@ -60,11 +67,11 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
           </optgroup>}
         </Select>
         <span title={result.canPull ? 'Pull from ' + result.upstream : 'The current branch needs an upstream to pull.'}>
-          <button type="button" className="quiet scm-pull" disabled={branchLocked || !result.canPull}
+          <button type="button" className="quiet scm-pull" disabled={worktreeLocked || result.mergeInProgress || !result.canPull}
             onClick={()=>onAction('git-pull',{branch:result.branch})}><ArrowDown size={14} aria-hidden="true"/> Pull</button>
         </span>
       </div>
-      {branchBlock && <small>{branchBlock}</small>}
+      {worktreeBlock && <small>{worktreeBlock}</small>}
       <div className="scm-message">
         <textarea ref={messageInput} rows={2} maxLength={8000} value={message} readOnly={!!busy}
           aria-label="Commit message" aria-describedby="scm-message-hint" placeholder={'Message (' + shortcut + ')'}
@@ -75,7 +82,7 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
           }}/>
         <button type="button" className="icon scm-generate" aria-label="Generate commit message with Codex"
           title="Generate commit message with Codex from staged changes" aria-describedby="scm-message-hint"
-          disabled={locked || !staged.length} onClick={async ()=>{
+          disabled={locked || !staged.length || hasConflicts} onClick={async ()=>{
             await onGenerate();
             messageInput.current?.focus();
           }}>
@@ -105,18 +112,30 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
           <button type="button" disabled={!canCommit || !canPush} onClick={()=>{setActionsOpen(false);onAction('git-commit-and-push');}}>
             <Check size={14} aria-hidden="true"/> Commit &amp; Push
           </button>
+          {result.canMerge && !result.mergeInProgress && <button type="button" disabled={worktreeLocked}
+            onClick={()=>{setActionsOpen(false);onAction('git-merge-upstream',{branch:result.branch});}}>
+            <ArrowDown size={14} aria-hidden="true"/> Merge from Remote
+          </button>}
+          {result.mergeInProgress && <button type="button" disabled={worktreeLocked}
+            onClick={()=>{setActionsOpen(false);onAction('git-abort-merge',{branch:result.branch});}}>
+            <Undo2 size={14} aria-hidden="true"/> Abort Merge
+          </button>}
           {!result.hasRemote && <small>No Git remote configured.</small>}
           {result.hasRemote && !result.branch && <small>Check out a branch to push.</small>}
         </div>
       </div>
       <small id="scm-message-hint" role="status">{messageHint}</small>
+      {result.mergeInProgress && <small>Merge in progress. Resolve and stage conflicts, then commit, or choose Abort Merge.</small>}
       {messageError && <small className="scm-error" role="alert">{messageError}</small>}
     </form>}
     {!result ? <p className="scm-empty">{busy || 'Refresh to load Git changes.'}</p>
       : !result.available ? <p className="scm-empty">{result.reason || 'The open folder is outside a Git working tree.'}</p>
-      : !staged.length && !changes.length ? <p className="scm-empty">No Git changes.</p>
-      : <div className="scm-tree">{[[true,'Staged Changes',staged],[false,'Changes',changes]].map(([isStaged,label,files])=>{
+      : !staged.length && !changes.length && !committed.length ? <p className="scm-empty">No Git changes.</p>
+      : <div className="scm-tree">{[['staged','Staged Changes',staged],['unstaged','Changes',changes],
+        ['committed','Local Commit Changes',committed]].map(([kind,label,files])=>{
         if (!files.length) return null;
+        const isStaged = kind === 'staged';
+        const isCommitted = kind === 'committed';
         const verb = isStaged ? 'Unstage' : 'Stage';
         const StageIcon = isStaged ? Minus : Plus;
         return <div className="scm-group" key={label}>
@@ -125,23 +144,31 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
               <span className="scm-count" aria-label={files.length + ' files'}>{files.length}</span>
             </summary>
             {files.map(file=>{
-              const group = isStaged ? 'staged' : file.group;
+              const group = file.group || kind;
               const slash = file.path.lastIndexOf('/');
               const current = selected?.group === group && selected.path === file.path;
+              const discardLabel = (isCommitted ? 'Undo committed changes to ' : 'Discard changes to ') + file.path;
               return <div className="scm-row" key={file.path} data-current={current}>
                 <button className="scm-file" disabled={!!busy} title={file.path} aria-current={current || undefined}
                   onClick={()=>onSelect(group,file)}>
                   <FileCode2 size={15} aria-hidden="true"/><span className="scm-name">{file.path.slice(slash+1)}</span>
                   {slash >= 0 && <span className="scm-directory">{file.path.slice(0,slash)}</span>}
                   <span className="scm-status" data-status={file.status} aria-label={gitStatusNames[file.status]}>{file.status === '?' ? 'U' : file.status}</span>
-                </button>{live && <button type="button" className="icon scm-stage" disabled={locked} title={verb + ' ' + file.path}
+                </button>
+                {live && !isStaged && file.status !== 'U' && <button type="button" className="icon scm-discard"
+                  disabled={worktreeLocked || (isCommitted && result.mergeInProgress)}
+                  title={discardLabel} aria-label={discardLabel}
+                  onClick={()=>onAction('git-discard',{group,path:file.path,localCommitRange:file.localCommitRange})}>
+                  <Undo2 size={15} aria-hidden="true"/>
+                </button>}
+                {live && !isCommitted && !(isStaged && file.status === 'U') && <button type="button" className="icon scm-stage" disabled={locked} title={verb + ' ' + file.path}
                   aria-label={verb + ' ' + file.path} onClick={()=>onAction(isStaged ? 'git-unstage' : 'git-stage',{group,path:file.path})}>
                   <StageIcon size={15} aria-hidden="true"/>
                 </button>}
               </div>;
             })}
           </details>
-          {live && <button type="button" className="icon scm-stage-all" disabled={locked}
+          {live && !isCommitted && <button type="button" className="icon scm-stage-all" disabled={locked}
             title={verb + ' all changes'} aria-label={verb + ' all changes'}
             onClick={()=>onAction(isStaged ? 'git-unstage-all' : 'git-stage-all')}>
             <StageIcon size={15} aria-hidden="true"/>
@@ -597,8 +624,9 @@ function App() {
     event.preventDefault();
     if (!folder) return;
     perform('Opening folder…',async () => {
-      setWorkspace((await api('open',{folder})).workspace);
-      setTab('Preview');
+      const {workspace:opened} = await api('open',{folder});
+      setWorkspace(opened);
+      setTab(opened.architecture && !opened.canPreview ? 'Architecture' : 'Preview');
       setFolder('');
       setImportOpen(false);
       setNotice({text:'Project opened.'});
@@ -775,12 +803,28 @@ function App() {
   }
   function gitAction(action,values = {}) {
     const combined = action === 'git-commit-and-push';
-    const changesTree = action === 'git-switch' || action === 'git-pull';
+    const discard = action === 'git-discard';
+    const abortMerge = action === 'git-abort-merge';
+    const changesTree = discard || ['git-switch','git-pull','git-merge-upstream','git-abort-merge'].includes(action);
     if (changesTree && (dirty || pending)) return;
+    if (abortMerge && !confirm('Abort the merge and discard any work done to resolve it?')) return;
+    if (discard) {
+      const questions = {
+        committed:'Undo local committed changes to "' + values.path + '"? Review, stage, and commit the resulting change before pushing.',
+        untracked:'Permanently delete the untracked file "' + values.path + '"?',
+        unstaged:'Discard unstaged changes to "' + values.path + '"? Any staged changes will be kept.'
+      };
+      const question = questions[values.group];
+      if (!confirm(question)) return;
+    }
     const labels = {'git-stage':'Staging file','git-unstage':'Unstaging file','git-commit':'Committing',
       'git-stage-all':'Staging all changes','git-unstage-all':'Unstaging all changes',
       'git-push':'Pushing','git-commit-and-push':'Committing and pushing',
-      'git-switch':'Switching branches','git-pull':'Pulling'};
+      'git-switch':'Switching branches','git-pull':'Pulling','git-discard':'Discarding changes',
+      'git-merge-upstream':'Merging from remote','git-abort-merge':'Aborting merge'};
+    const worktreeNotices = {'git-switch':'Branch switched.','git-pull':'Pull complete.',
+      'git-discard':values.group === 'committed' ? 'Undo ready to review, stage, and commit.' : 'Changes discarded.',
+      'git-merge-upstream':'Remote changes merged. Push when ready.','git-abort-merge':'Merge aborted.'};
     perform(labels[action] + '…',async () => {
       try {
         if (combined || action === 'git-commit') {
@@ -788,12 +832,12 @@ function App() {
           setCommitMessage('');
           setNotice({text:combined ? 'Commit pushed.' : 'Commit created.'});
         } else {
-          const result = await api(action,values);
+          const result = await api(action,discard || abortMerge ? {...values,approved:true} : values);
           if (changesTree) {
             await refreshDraft(result.workspace);
             setSelection(null);
             if (ready) refreshPreview();
-            setNotice({text:action === 'git-switch' ? 'Branch switched.' : 'Pull complete.'});
+            setNotice({text:worktreeNotices[action]});
           }
           if (action === 'git-push') setNotice({text:'Branch pushed.'});
         }
@@ -833,6 +877,7 @@ function App() {
     });
   }
   const views = [['Preview',Globe2],['Database',Database]];
+  if (workspace?.architecture) views.splice(1,0,['Architecture',Network]);
   if (workspace && !workspace.live) views.push(['Publish',ArrowUpRight]);
   return <>
     <header className="topbar">
@@ -876,8 +921,8 @@ function App() {
           onRefresh={()=>perform('Refreshing Git changes…',refreshGit)} onAction={gitAction} onGenerate={generateCommitMessage}
           message={commitMessage} setMessage={message=>{setCommitMessage(message);setCommitMessageError('');}}
           messageError={commitMessageError} busy={busy} locked={locked} live={workspace?.live}
-          branchBlock={dirty ? 'Save your source changes before switching or pulling.'
-            : pending ? 'Resolve the pending edit before switching or pulling.' : ''}/> : <>
+          worktreeBlock={dirty ? 'Save your source changes before changing the working tree.'
+            : pending ? 'Resolve the pending edit before changing the working tree.' : ''}/> : <>
         <div className="panel-label"><span>EXPLORER</span><FolderOpen size={15} aria-hidden="true"/></div>
         <div className="project"><FolderOpen size={15} aria-hidden="true"/><strong title={workspace?.name}>{workspace?.name || 'No folder open'}</strong></div>
         {workspace ? <>
@@ -892,7 +937,7 @@ function App() {
         <div className="canvas-toolbar">
           <div className="tabs" role="group" aria-label="Workspace view">{views.map(([name,Icon])=>
             <button key={name} className={tab === name ? 'active' : ''} aria-pressed={tab === name} onClick={()=>view(name)} disabled={!!busy}><Icon size={15} aria-hidden="true"/>{name}</button>)}</div>
-          {tab !== 'Database' && <div className="view-actions">
+          {tab !== 'Database' && tab !== 'Architecture' && <div className="view-actions">
             {ready && tab === 'Preview' && <button type="button" className="icon" aria-label="Refresh preview"
               title="Refresh preview" onClick={refreshPreview}><RefreshCw size={16} aria-hidden="true"/></button>}
             <button className="icon" aria-label="Desktop viewport" aria-pressed={device === 'desktop'} onClick={()=>setDevice('desktop')}><Monitor size={16}/></button>
@@ -924,6 +969,7 @@ function App() {
               port={port} onPortChange={setPort} busy={locked}/>}
           </div>
           <DatabasePanel api={api} hidden={tab !== 'Database'}/>
+          {workspace?.architecture && <ArchitecturePanel api={api} hidden={tab !== 'Architecture'}/>}
           {tab === 'Source' && <div className="source-box draft-source">
             {file ? <>
               <div className="source-head">

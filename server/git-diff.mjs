@@ -17,6 +17,13 @@ export function readStagedPatch(cwd) {
   return runGitDiff(cwd,...diffOptions,'--cached','--patch','--unified=2','--','.');
 }
 
+export async function readCommitDiff(cwd,{base,head},path) {
+  if (path !== undefined) {
+    return {patch:await runGitDiff(cwd,...diffOptions,'--no-renames','--patch',base,head,'--',path)};
+  }
+  return changedFiles(await runGitDiff(cwd,...diffOptions,'--no-renames','--name-status','-z',base,head,'--','.'));
+}
+
 function changedFiles(output) {
   const fields = output.split('\0');
   const files = [];
@@ -69,5 +76,8 @@ export async function readGitDiff(cwd,selection) {
     run(...overrides,...diffOptions,'--name-status','-z','--','.'),
     listUntracked()
   ]);
-  return {available:true,staged:changedFiles(staged),unstaged:changedFiles(unstaged),untracked};
+  const unstagedFiles = changedFiles(unstaged);
+  const conflicts = new Set(unstagedFiles.filter(file=>file.status === 'U').map(file=>file.path));
+  return {available:true,staged:changedFiles(staged),
+    unstaged:unstagedFiles.filter(file=>file.status === 'U' || !conflicts.has(file.path)),untracked};
 }

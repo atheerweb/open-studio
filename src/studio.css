@@ -327,7 +327,7 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 }
 .scm-group:has(.scm-stage-all) summary { padding-inline-end: 34px; }
 .scm-group .scm-stage-all { position: absolute; inset-block-start: 2px; inset-inline-end: 3px; }
-.scm-group .scm-stage-all, .scm-row .scm-stage, .scm-message .scm-generate {
+.scm-group .scm-stage-all, .scm-row .icon, .scm-message .scm-generate {
   min-width: 27px;
   min-height: 27px;
   padding: 4px;
@@ -363,7 +363,7 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 .scm-row[data-current="true"] .scm-file svg { color: var(--accent); }
 .scm-row { display: flex; align-items: stretch; }
 .scm-row .scm-file { flex: 1; min-width: 0; }
-.scm-row .scm-stage { flex: 0 0 auto; align-self: center; margin-inline-end: 3px; }
+.scm-row .icon { flex: 0 0 auto; align-self: center; margin-inline-end: 3px; }
 .scm-controls { display: grid; grid-template-columns: minmax(0,1fr); gap: 6px; padding: 8px 3px 10px; }
 .scm-controls small { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .scm-controls .scm-error { color: var(--error); overflow-wrap: anywhere; }

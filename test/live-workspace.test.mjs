@@ -65,7 +65,23 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
     assert.match(commitRequests[0].input.patch,/Accepted/);
     assert.doesNotMatch(commitRequests[0].input.patch,/Unstaged draft|package\.json/);
     assert.equal(git(source,'status','--short'),['AM '+file,'?? package.json'].join('\n'));
-    await writeFile(join(source,file),'<template>Accepted</template>');
+    await call('git-discard',{group:'unstaged',path:file},403);
+    await call('git-discard',{group:'staged',path:file,approved:true},400);
+    assert.match((await call('read',{file})).text,/Unstaged draft/);
+    await call('git-discard',{group:'unstaged',path:file,approved:true});
+    assert.equal((await call('read',{file})).text,'<template>Accepted</template>');
+    assert.equal(git(source,'status','--short'),['A  '+file,'?? package.json'].join('\n'));
+
+    const scratch = 'src/scratch[1].vue';
+    await writeFile(join(source,scratch),'<template>Scratch</template>');
+    await writeFile(join(source,'src/scratch1.vue'),'<template>Keep</template>');
+    await call('git-discard',{group:'untracked',path:'src',approved:true},400);
+    const discarded = await call('git-discard',{group:'untracked',path:scratch,approved:true});
+    assert.ok(!discarded.workspace.files.includes(scratch));
+    await assert.rejects(readFile(join(source,scratch)),{code:'ENOENT'});
+    assert.match(await readFile(join(source,'src/scratch1.vue'),'utf8'),/Keep/);
+    await rm(join(source,'src/scratch1.vue'));
+
     await call('git-commit',suggestion);
     assert.match(git(source,'show','HEAD:'+file),/Accepted/);
     assert.equal(git(source,'status','--short'),'?? package.json');
@@ -90,7 +106,7 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
   }
 });
 
-test('switches local and remote branches and pulls upstream changes without merging divergent history', async () => {
+test('switches branches, pulls fast-forwards, and recovers a rejected push while undoing a committed file', async () => {
   const root = await mkdtemp(join(tmpdir(),'open-studio-branches-'));
   const source = join(root,'repo');
   const remote = join(root,'remote.git');
@@ -142,12 +158,65 @@ test('switches local and remote branches and pulls upstream changes without merg
     await call('git-pull',{branch:'feature/preview'});
     assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Remote update</template>');
 
-    git(source,'-c','user.name=Studio Test','-c','user.email=studio@example.test','commit','--allow-empty','-m','Local commit');
+    git(source,'config','user.name','Studio Test');
+    git(source,'config','user.email','studio@example.test');
+    const unwanted = 'nwc-file';
+    await writeFile(join(source,unwanted),'Accidental local file');
+    git(source,'add','--',unwanted);
+    git(source,'commit','-m','Local commit');
     const localHead = git(source,'rev-parse','HEAD');
-    git(writer,'commit','--allow-empty','-m','Remote commit');
+    await writeFile(join(writer,'src/Preview.vue'),'<template>Divergent remote update</template>');
+    git(writer,'commit','-am','Remote commit');
+    const remoteHead = git(writer,'rev-parse','HEAD');
     git(writer,'push','origin','feature/preview');
+
+    const rejected = await call('git-push',{},422);
+    assert.match(rejected.error,/Merge from Remote/);
     await call('git-pull',{branch:'feature/preview'},422);
     assert.equal(git(source,'rev-parse','HEAD'),localHead);
+    const {committed,localCommitRange} = await call('git-diff');
+    assert.deepEqual(committed,[{status:'A',path:unwanted}]);
+    const undo = {group:'committed',path:unwanted,localCommitRange};
+    assert.match((await call('git-file',undo)).patch,/\+Accidental local file/);
+    await call('git-discard',undo,403);
+    await writeFile(join(source,unwanted),'Uncommitted edit');
+    await call('git-discard',{...undo,approved:true},409);
+    assert.equal(await readFile(join(source,unwanted),'utf8'),'Uncommitted edit');
+    await call('git-discard',{group:'unstaged',path:unwanted,approved:true});
+    await call('git-discard',{...undo,approved:true});
+    assert.equal(git(source,'rev-parse','HEAD'),localHead);
+    assert.equal(git(source,'status','--short'),'D '+unwanted);
+    await call('git-stage',{group:'unstaged',path:unwanted});
+    await call('git-commit',{message:'Remove accidental file'});
+    assert.deepEqual((await call('git-diff')).committed,[]);
+
+    await call('git-merge-upstream',{branch:'main'},409);
+    git(source,'branch','--unset-upstream');
+    await call('git-merge-upstream',{branch:'feature/preview'});
+    git(source,'merge-base','--is-ancestor',localHead,'HEAD');
+    git(source,'merge-base','--is-ancestor',remoteHead,'HEAD');
+    assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Divergent remote update</template>');
+    await call('git-push');
+    assert.equal(git(remote,'rev-parse','refs/heads/feature/preview'),git(source,'rev-parse','HEAD'));
+    assert.throws(()=>git(remote,'cat-file','-e','refs/heads/feature/preview:'+unwanted));
+    assert.equal((await call('git-diff')).upstream,'origin/feature/preview');
+
+    await writeFile(join(source,'src/Preview.vue'),'<template>Local commit for conflict</template>');
+    await call('git-merge-upstream',{branch:'feature/preview'},409);
+    git(source,'commit','-am','Conflicting local commit');
+    const preMerge = git(source,'rev-parse','HEAD');
+    git(writer,'pull','--ff-only','origin','feature/preview');
+    await writeFile(join(writer,'src/Preview.vue'),'<template>Remote commit for conflict</template>');
+    git(writer,'commit','-am','Conflicting remote commit');
+    git(writer,'push','origin','feature/preview');
+    await call('git-merge-upstream',{branch:'feature/preview'},409);
+    const conflict = await call('git-diff');
+    assert.equal(conflict.mergeInProgress,true);
+    assert.deepEqual(conflict.unstaged,[{status:'U',path:'src/Preview.vue'}]);
+    await call('git-abort-merge',{branch:'feature/preview'},403);
+    await call('git-abort-merge',{branch:'feature/preview',approved:true});
+    assert.equal((await call('git-diff')).mergeInProgress,false);
+    assert.equal(git(source,'rev-parse','HEAD'),preMerge);
 
     await writeFile(join(source,'src/Preview.vue'),'<template>Local changes</template>');
     await call('git-switch',{ref:'refs/heads/main'},422);
