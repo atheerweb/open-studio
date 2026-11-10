@@ -168,7 +168,7 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
     await git(root,'pull','--ff-only','--no-rebase','--no-autostash','--no-recurse-submodules','--',remote,ref);
     return;
   }
-  if (action === 'git-merge-upstream' || action === 'git-abort-merge') {
+  if (action === 'git-merge-upstream' || action === 'git-merge-and-push' || action === 'git-abort-merge') {
     const {branch,remote,ref} = await branchInfo(root);
     if (!branch || branch !== expectedBranch) throw fail('The current branch changed. Check the branch and try again.',409);
     const mergeHead = await optionalGitRef(root,'rev-parse','--verify','--quiet','MERGE_HEAD');
@@ -196,6 +196,14 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
       }
       throw error;
     }
+    if (action === 'git-merge-and-push') {
+      try {
+        await changeGitWorkspace(root,{action:'git-push',branch});
+      } catch (error) {
+        error.message = 'Remote changes merged. Push failed. ' + error.message;
+        throw error;
+      }
+    }
     return;
   }
   if (action === 'git-stage-all') {
@@ -209,6 +217,9 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
   if (action === 'git-push') {
     const {branch,remote,ref} = await branchInfo(root);
     if (!branch) throw fail('Check out a branch before pushing.');
+    if (expectedBranch !== undefined && branch !== expectedBranch) {
+      throw fail('The current branch changed. Check the branch and try again.',409);
+    }
     const tracked = Boolean(remote && ref);
     const remotes = tracked ? [] : (await git(root,'remote')).split('\n').filter(Boolean);
     const target = tracked ? remote : defaultRemote(remotes);
@@ -220,7 +231,8 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
         'push',...(tracked ? [] : ['--set-upstream']),'--',target,localRef + ':' + (tracked ? ref : localRef));
     } catch (error) {
       if (/\[rejected\][^\r\n]*\((fetch first|non-fast-forward)\)/.test(error.message)) {
-        throw fail('The remote branch has commits you do not have. Choose Merge from Remote in Source Control, then push again.\n' + error.message,422);
+        throw Object.assign(fail('The remote branch has commits you do not have. Choose Merge & Push in Source Control.\n' + error.message,422),
+          {rejectedPushBranch:branch});
       }
       throw error;
     }
@@ -235,7 +247,8 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
       try {
         await changeGitWorkspace(root,{action:'git-push'});
       } catch (error) {
-        throw Object.assign(fail('Commit created. Push failed. ' + error.message,422),{committed:true});
+        throw Object.assign(fail('Commit created. Push failed. ' + error.message,422),
+          {committed:true,rejectedPushBranch:error.rejectedPushBranch});
       }
     }
     return;

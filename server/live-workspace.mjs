@@ -7,17 +7,22 @@ import { fingerprint } from './draft-publish.mjs';
 import { VueDraft } from './vue-draft.mjs';
 import { routeBridge } from './vue-page.mjs';
 
+export async function resolveLocalProjectFolder(folder) {
+  if (typeof folder !== 'string' || !isAbsolute(folder) || folder.startsWith('\\\\')) {
+    throw new Error('Enter an absolute local project folder.');
+  }
+  const source = await realpath(folder);
+  if (source === dirname(source) || !(await lstat(source)).isDirectory()) {
+    throw new Error('Select a local project folder.');
+  }
+  return source;
+}
+
 export class LiveWorkspace extends VueDraft {
   live = true;
 
   static async open(folder,store) {
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.startsWith('\\\\')) {
-      throw new Error('Enter an absolute local project folder.');
-    }
-    const source = await realpath(folder);
-    if (source === dirname(source) || !(await lstat(source)).isDirectory()) {
-      throw new Error('Select a local project folder.');
-    }
+    const source = await resolveLocalProjectFolder(folder);
     const workspace = new LiveWorkspace(source,source);
     workspace.name = basename(source);
     if (store) {

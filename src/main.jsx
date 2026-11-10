@@ -12,9 +12,6 @@ import {SkillPrompt} from './skill-prompt.jsx';
 import {Select} from './select.jsx';
 
 const SourceEditor = lazy(() => import('./source-editor.jsx'));
-const workspaceRole = window.location.hash === '#backend' ? 'backend' : 'frontend';
-const isBackend = workspaceRole === 'backend';
-document.title = 'Open Studio — ' + (isBackend ? 'Backend' : 'Frontend');
 
 const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked'],['committed','Local Commit Changes']];
 const gitStatusNames = {A:'Added',M:'Modified',D:'Deleted',R:'Renamed',C:'Copied',T:'Type changed',U:'Conflict','?':'Untracked'};
@@ -27,7 +24,7 @@ function gitFiles(result,group) {
 
 const generatingCommitMessage = 'Generating commit message…';
 
-function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,message,setMessage,messageError,busy,locked,live,worktreeBlock}) {
+function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,message,setMessage,messageError,pushRejection,busy,locked,live,worktreeBlock}) {
   const [actionsOpen,setActionsOpen] = useState(false);
   const actionsButton = useRef(null);
   const messageInput = useRef(null);
@@ -41,6 +38,8 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
   const remoteBranches = result?.branches?.remote || [];
   const currentRef = localBranches.includes(result?.branch) ? 'refs/heads/' + result.branch : '';
   const worktreeLocked = locked || Boolean(worktreeBlock);
+  const canRecoverPush = result?.canMerge && !result.mergeInProgress && pushRejection?.branch === result.branch;
+  const trackedChanges = staged.length > 0 || changes.some(file=>file.group === 'unstaged');
   const generating = busy === generatingCommitMessage;
   const shortcut = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
   const messageHint = generating ? generatingCommitMessage
@@ -128,6 +127,16 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
         </div>
       </div>
       <small id="scm-message-hint" role="status">{messageHint}</small>
+      {canRecoverPush && <>
+        <small id="scm-push-rejection" className="scm-error" role="alert">
+          {pushRejection.committed && 'Commit created. '}The remote branch has new commits.
+          {trackedChanges && ' Commit or discard tracked changes before merging.'}
+        </small>
+        <button type="button" className="quiet" aria-describedby="scm-push-rejection"
+          disabled={worktreeLocked || trackedChanges} onClick={()=>onAction('git-merge-and-push',{branch:result.branch})}>
+          <GitCompareArrows size={15} aria-hidden="true"/> Merge &amp; Push
+        </button>
+      </>}
       {result.mergeInProgress && <small>Merge in progress. Resolve and stage conflicts, then commit, or choose Abort Merge.</small>}
       {messageError && <small className="scm-error" role="alert">{messageError}</small>}
     </form>}
@@ -213,10 +222,12 @@ function GitPatch({result,selected,content}) {
 async function api(action, values = {}) {
   const response = await fetch('/api/vue',{
     method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action,...values,workspace:workspaceRole})
+    body:JSON.stringify({action,...values})
   });
   const result = await response.json();
-  if (!response.ok) throw Object.assign(new Error(result.error || 'The workspace request failed.'),{committed:result.committed});
+  if (!response.ok) throw Object.assign(new Error(result.error || 'The workspace request failed.'),{
+    committed:result.committed,rejectedPushBranch:result.rejectedPushBranch
+  });
   return result;
 }
 
@@ -311,7 +322,7 @@ function FileList({files, filter, active, onChoose, busy}) {
     <FileCode2 size={14} aria-hidden="true"/><span>{name}</span>
   </button>;
   const tree = folder => <>
-    {[...folder.folders].map(([name,child])=><details key={name} open>
+    {[...folder.folders].map(([name,child])=><details key={name}>
       <summary><ChevronRight size={12} aria-hidden="true"/><Folder size={14} aria-hidden="true"/><span>{name}</span></summary>
       <div className="folder-children">{tree(child)}</div>
     </details>)}
@@ -320,8 +331,37 @@ function FileList({files, filter, active, onChoose, busy}) {
   return <div className="file-list">
     <div hidden={!!query}>{tree(folderTree(files))}</div>
     {query && matches.map(path=>row(path,path))}
-    {!(query ? matches.length : files.length) && <small>{query ? 'No matching files.' : 'No Vue files found.'}</small>}
+    {!(query ? matches.length : files.length) && <small>{query ? 'No matching files.' : 'No project files found.'}</small>}
   </div>;
+}
+
+function ProjectFiles({side,active,onChoose,busy}) {
+  const [filter,setFilter] = useState('');
+  const [revision,setRevision] = useState(0);
+  const [listing,setListing] = useState(null);
+  useEffect(() => {
+    let current = true;
+    api('explorer-files',{side}).then(result => {
+      if (current) setListing(result);
+    }).catch(error => {
+      if (current) setListing({error:error.message === 'Unknown workspace action.'
+        ? 'Restart Open Studio to load the updated Explorer.' : error.message});
+    });
+    return () => { current = false; };
+  },[side,revision]);
+  return <>
+    <div className="explorer-filter">
+      <label className="search"><Search size={15} aria-hidden="true"/>
+        <input aria-label="Filter project files" placeholder="Filter files…" value={filter} onChange={event=>setFilter(event.target.value)}/>
+      </label>
+      <button type="button" className="icon" aria-label="Refresh project files" title="Refresh project files" disabled={!listing || busy}
+        onClick={()=>{setListing(null);setRevision(value=>value + 1);}}><RefreshCw size={15} aria-hidden="true"/></button>
+    </div>
+    {listing?.files ? <>
+      {listing.truncated && <small className="explorer-message">Showing the first 5,000 files.</small>}
+      <FileList files={listing.files} filter={filter} active={active} onChoose={onChoose} busy={busy}/>
+    </> : <small className="explorer-message" role={listing?.error ? 'alert' : 'status'}>{listing?.error || 'Loading files…'}</small>}
+  </>;
 }
 
 function EmptyPreview({onImport, workspace, onStart, port, onPortChange, busy}) {
@@ -332,7 +372,6 @@ function EmptyPreview({onImport, workspace, onStart, port, onPortChange, busy}) 
       <h1>{workspace ? (canPreview ? 'Your project is ready to run' : workspace.name) : 'Open a project folder'}</h1>
       <p>{workspace ? (canPreview ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
         : 'Open Source Control to review and commit changes. Live preview is available for Vue projects that use Vite.')
-        : isBackend ? 'Open a Laravel project to explore its modules, business lifecycles, and system design.'
         : 'Edit and preview your Vue project locally, then review, commit, and push with Source Control.'}</p>
       {canPreview && <form className="preview-start" onSubmit={onStart}>
         <label htmlFor="preview-port">Preview port
@@ -403,10 +442,11 @@ function EmptyPreview({onImport, workspace, onStart, port, onPortChange, busy}) 
 
 function App() {
   const [workspace,setWorkspace] = useState(null);
+  const [savedWorkspaces,setSavedWorkspaces] = useState(null);
   const [folder,setFolder] = useState('');
-  const [importOpen,setImportOpen] = useState(false);
-  const [port,setPort] = useState(isBackend ? '5175' : '5174');
-  const [busy,setBusy] = useState('');
+  const [folderMode,setFolderMode] = useState(null);
+  const [port,setPort] = useState('5174');
+  const [busy,setBusy] = useState('Restoring workspace…');
   const [agentTurn,setAgentTurn] = useState(null);
   const [previewProgress,setPreviewProgress] = useState(null);
   const [previewRevision,setPreviewRevision] = useState(0);
@@ -426,11 +466,12 @@ function App() {
   const [gitContent,setGitContent] = useState(null);
   const [commitMessage,setCommitMessage] = useState('');
   const [commitMessageError,setCommitMessageError] = useState('');
+  const [pushRejection,setPushRejection] = useState(null);
   const [resolution,setResolution] = useState(null);
   const [previewChecked,setPreviewChecked] = useState(false);
   const [tab,setTab] = useState('Preview');
   const [device,setDevice] = useState('desktop');
-  const [filter,setFilter] = useState('');
+  const [backendExplorerFolder,setBackendExplorerFolder] = useState(null);
   const [logOpen,setLogOpen] = useState(false);
   const [explorerOpen,setExplorerOpen] = useState(true);
   const [sidebar,setSidebar] = useState('explorer');
@@ -444,6 +485,7 @@ function App() {
   const [reasoningEffort,setReasoningEffort] = useState('');
   const [editApproval,setEditApproval] = useState('shared');
   const preview = useRef(null);
+  const fileRequest = useRef(0);
   const pickerButton = useRef(null);
   const dialog = useRef(null);
   const chatLog = useRef(null);
@@ -451,6 +493,10 @@ function App() {
   const sessionHeading = useRef(null);
   const focusSessionHeading = useRef(false);
   const dirty = Boolean(file && editor !== file.text);
+  const backendFolder = workspace?.backend?.folder;
+  const explorerSide = backendFolder && backendExplorerFolder === backendFolder ? 'backend' : 'frontend';
+  const explorerName = explorerSide === 'backend' ? workspace.backend.name : workspace?.name;
+  const linkingBackend = folderMode === 'backend';
   const ready = workspace?.state === 'ready';
   const canPick = ready && !!route && !dirty && !busy;
   const selectedElement = selection?.route === route ? selection.element : null;
@@ -463,7 +509,7 @@ function App() {
   const sessionTitle = workspace?.sessions?.find(session=>session.id === sessionId)?.title;
   const prompt = sessionPrompts[sessionId] || '';
   const setPrompt = value => setSessionPrompts(prompts=>({...prompts,[sessionId]:value}));
-  const target = (manualRoute === route ? file?.file : null) || pageFile;
+  const target = (manualRoute === route && !file?.side ? file?.file : null) || pageFile;
   const selectedModel = models.find(item => item.id === model);
   const pending = workspace?.pendingEdit;
   const blockedEdits = pending?.blockedFiles || [];
@@ -479,13 +525,15 @@ function App() {
     : !consent ? 'Enable sharing below to send.' : '';
 
   useEffect(() => {
-    api('status').then(({workspace:opened})=>{
+    api('status').then(({workspace:opened,savedWorkspaces,workspaceWarning})=>{
       setWorkspace(opened);
+      setSavedWorkspaces(savedWorkspaces ?? null);
+      if (workspaceWarning) setNotice({error:true,text:workspaceWarning});
       if (opened?.architecture && !opened.canPreview) {
         setTab('Architecture');
         setAgentOpen(false);
       }
-    }).catch(error => setNotice({error:true,text:error.message}));
+    }).catch(error => setNotice({error:true,text:error.message})).finally(()=>setBusy(''));
   },[]);
   useEffect(() => {
     if (busy !== 'Starting Vite preview…') return;
@@ -525,9 +573,9 @@ function App() {
     });
   },[agentTurn,busy]);
   useEffect(() => {
-    if (importOpen && !dialog.current.open) dialog.current.showModal();
-    if (!importOpen && dialog.current.open) dialog.current.close();
-  },[importOpen]);
+    if (folderMode && !dialog.current.open) dialog.current.showModal();
+    if (!folderMode && dialog.current.open) dialog.current.close();
+  },[folderMode]);
   useEffect(() => {
     if (agentOpen && chatLog.current && followChat.current) chatLog.current.scrollTop = chatLog.current.scrollHeight;
   },[agentOpen,showHistory,sessionId,messages.length,latestMessage,activity,workspace?.agentSteps,pending]);
@@ -602,14 +650,14 @@ function App() {
     return () => {active = false;};
   },[route,selection]);
   useEffect(() => {
-    if (!pageFile || dirty || busy || file?.file === pageFile) return;
-    let active = true;
+    if (!pageFile || dirty || busy || file?.side || file?.file === pageFile) return;
+    const request = ++fileRequest.current;
     api('read',{file:pageFile}).then(result => {
-      if (active) openFile(result);
+      if (request === fileRequest.current) openFile(result);
     }).catch(error => {
-      if (active) setNotice({error:true,text:error.message});
+      if (request === fileRequest.current) setNotice({error:true,text:error.message});
     });
-    return () => {active = false;};
+    return () => {if (request === fileRequest.current) fileRequest.current++;};
   },[pageFile]);
 
   function openFile(value) {
@@ -630,18 +678,45 @@ function App() {
       if (result.folder) setFolder(result.folder);
     });
   }
-  function importProject(event) {
+  function openFolderDialog(mode = 'project') {
+    if (locked) return;
+    setFolder('');
+    setNotice(null);
+    setFolderMode(mode);
+  }
+  function submitFolder(event) {
     event.preventDefault();
-    if (!folder) return;
-    perform('Opening folder…',async () => {
-      const {workspace:opened} = await api('open',{folder});
+    openFolder(folder);
+  }
+  function openFolder(folder) {
+    if (!folder || locked) return;
+    if (linkingBackend && folder !== backendFolder && file?.side === 'backend' && dirty &&
+        !confirm('Change the backend and discard the unsaved changes in this file?')) return;
+    if (!linkingBackend && workspace && folder !== workspace.folder && dirty &&
+        !confirm('Switch workspaces and discard the unsaved changes in this file?')) return;
+    perform(linkingBackend ? 'Linking backend…' : 'Opening folder…',async () => {
+      const {workspace:opened,savedWorkspaces,workspaceWarning} = await api(linkingBackend ? 'link-backend' : 'open',
+        {folder,replace:!linkingBackend && !!workspace});
+      if (!linkingBackend && opened.folder !== workspace?.folder) resetWorkspaceView();
       setWorkspace(opened);
-      const showArchitecture = opened.architecture && !opened.canPreview;
-      setTab(showArchitecture ? 'Architecture' : 'Preview');
-      if (showArchitecture) setAgentOpen(false);
-      setFolder('');
-      setImportOpen(false);
-      setNotice({text:'Project opened.'});
+      setSavedWorkspaces(savedWorkspaces ?? null);
+      if (linkingBackend && file?.side === 'backend' && opened.backend?.folder !== backendFolder) openFile(null);
+      if (linkingBackend || opened.folder !== workspace?.folder) {
+        const showArchitecture = opened.architecture && !opened.canPreview;
+        setTab(linkingBackend || showArchitecture ? 'Architecture' : 'Preview');
+        if (showArchitecture) setAgentOpen(false);
+      }
+      setFolderMode(null);
+      setNotice(workspaceWarning ? {error:true,text:workspaceWarning} : {text:linkingBackend ? 'Backend linked.' : 'Project opened.'});
+    });
+  }
+  function unlinkBackend() {
+    if (file?.side === 'backend' && dirty && !confirm('Unlink the backend and discard the unsaved changes in this file?')) return;
+    perform('Unlinking backend…',async () => {
+      setWorkspace((await api('unlink-backend')).workspace);
+      setBackendExplorerFolder(null);
+      if (file?.side === 'backend') openFile(null);
+      setNotice({text:'Backend unlinked.'});
     });
   }
   function start(event) {
@@ -661,32 +736,48 @@ function App() {
   function close() {
     if (dirty && !confirm('Close the folder and discard the unsaved text in this editor?')) return;
     perform('Closing folder…',async () => {
-      await api('close');
-      setWorkspace(null); setRoute(null); setPageFile(null); setManualRoute(null);
-      setResolving(false); setSelection(null); setPicking(false); setReview(null); setGitDiff(null); setResolution(null);
-      setGitFile(null); setGitContent(null); setCommitMessage(''); setCommitMessageError(''); setSidebar('explorer');
-      setPreviewChecked(false); setConsent(false); setHistoryOpen(null); setSessionPrompts({}); setTab('Preview');
-      openFile(null);
+      const {savedWorkspaces} = await api('close');
+      setWorkspace(null);
+      setSavedWorkspaces(savedWorkspaces ?? null);
+      resetWorkspaceView();
     });
   }
-  function choose(name,{keepSelection = false} = {}) {
-    if (keepSelection && dirty && file.file === name) {
+  function resetWorkspaceView() {
+    fileRequest.current++;
+    setRoute(null); setPageFile(null); setManualRoute(null); setBackendExplorerFolder(null);
+    setResolving(false); setSelection(null); setPicking(false); setReview(null); setGitDiff(null); setResolution(null);
+    setGitFile(null); setGitContent(null); setCommitMessage(''); setCommitMessageError(''); setSidebar('explorer');
+    setPushRejection(null);
+    setPreviewChecked(false); setConsent(false); setHistoryOpen(null); setSessionPrompts({}); setTab('Preview');
+    setModels([]); setModelStatus('idle'); setModel(''); setReasoningEffort('');
+    openFile(null);
+  }
+  function choose(name,{keepSelection = false,side} = {}) {
+    if (keepSelection && dirty && file.file === name && file.side === side) {
       setTab('Source');
       return;
     }
     if (dirty && !confirm('Discard the unsaved changes in this editor?')) return;
     perform('Opening source…',async () => {
-      openFile(await api('read',{file:name}));
+      fileRequest.current++;
+      const opened = await api(side ? 'explorer-read' : 'read',{file:name,side});
+      openFile({...opened,side});
       if (!keepSelection) {
         setSelection(null);
-        setManualRoute(route);
+        setManualRoute(side ? null : route);
       }
       setTab('Source');
     });
   }
+  function chooseExplorerFile(name) {
+    const vueSource = explorerSide === 'frontend' && workspace.files.includes(name);
+    choose(name,{side:vueSource ? undefined : explorerSide});
+  }
   function save(text) {
     perform('Saving source…',async () => {
-      openFile(await api('write',{file:file.file,hash:file.hash,text}));
+      const {side,hash} = file;
+      const saved = await api(side ? 'explorer-write' : 'write',{side,file:file.file,hash,text});
+      openFile({...saved,side});
       setNotice({text:'File saved.'});
     });
   }
@@ -737,7 +828,7 @@ function App() {
   async function refreshDraft(updatedWorkspace) {
     updatedWorkspace ??= (await api('status')).workspace;
     setWorkspace(updatedWorkspace);
-    if (file) openFile(updatedWorkspace.files.includes(file.file) ? await api('read',{file:file.file}) : null);
+    if (file && !file.side) openFile(updatedWorkspace.files.includes(file.file) ? await api('read',{file:file.file}) : null);
     if (tab === 'Publish') setReview(await api('review'));
     setPreviewChecked(false);
   }
@@ -817,7 +908,7 @@ function App() {
     const combined = action === 'git-commit-and-push';
     const discard = action === 'git-discard';
     const abortMerge = action === 'git-abort-merge';
-    const changesTree = discard || ['git-switch','git-pull','git-merge-upstream','git-abort-merge'].includes(action);
+    const changesTree = discard || ['git-switch','git-pull','git-merge-upstream','git-merge-and-push','git-abort-merge'].includes(action);
     if (changesTree && (dirty || pending)) return;
     if (abortMerge && !confirm('Abort the merge and discard any work done to resolve it?')) return;
     if (discard) {
@@ -833,10 +924,11 @@ function App() {
       'git-stage-all':'Staging all changes','git-unstage-all':'Unstaging all changes',
       'git-push':'Pushing','git-commit-and-push':'Committing and pushing',
       'git-switch':'Switching branches','git-pull':'Pulling','git-discard':'Discarding changes',
-      'git-merge-upstream':'Merging from remote','git-abort-merge':'Aborting merge'};
+      'git-merge-upstream':'Merging from remote','git-merge-and-push':'Merging and pushing','git-abort-merge':'Aborting merge'};
     const worktreeNotices = {'git-switch':'Branch switched.','git-pull':'Pull complete.',
       'git-discard':values.group === 'committed' ? 'Undo ready to review, stage, and commit.' : 'Changes discarded.',
-      'git-merge-upstream':'Remote changes merged. Push when ready.','git-abort-merge':'Merge aborted.'};
+      'git-merge-upstream':'Remote changes merged. Push when ready.','git-merge-and-push':'Remote changes merged and branch pushed.',
+      'git-abort-merge':'Merge aborted.'};
     perform(labels[action] + '…',async () => {
       try {
         if (combined || action === 'git-commit') {
@@ -853,10 +945,18 @@ function App() {
           }
           if (action === 'git-push') setNotice({text:'Branch pushed.'});
         }
+        const finishedMerge = action === 'git-commit' && gitDiff?.mergeInProgress;
+        if (combined || finishedMerge || ['git-push','git-merge-and-push','git-merge-upstream','git-switch'].includes(action)) {
+          setPushRejection(null);
+        }
       } catch (error) {
         if (error.committed) setCommitMessage('');
         if (changesTree) await refreshDraft().catch(() => {});
         await refreshGit().catch(() => {});
+        if (error.rejectedPushBranch) {
+          setPushRejection({branch:error.rejectedPushBranch,committed:error.committed});
+          return;
+        }
         throw error;
       }
       await refreshGit();
@@ -889,7 +989,7 @@ function App() {
     });
   }
   const views = [['Preview',Globe2],['Database',Database]];
-  if (workspace?.architecture) views.splice(1,0,['Architecture',Network]);
+  if (workspace) views.splice(1,0,['Architecture',Network]);
   if (workspace && !workspace.live) views.push(['Publish',ArrowUpRight]);
   return <>
     <header className="topbar">
@@ -903,13 +1003,14 @@ function App() {
         <span>Open Studio</span>
       </div>
       <div className="workspace-path">
-        <span className="workspace-label">{isBackend ? 'BACKEND' : 'FRONTEND'}</span><span title={workspace?.name}>{workspace?.name || 'Workspace'}</span>
+        <span className="workspace-label">LOCAL</span><span title={workspace?.name}>{workspace?.name || 'Workspace'}</span>
       </div>
       <div className="top-right">
-        <a className="workspace-window" href={isBackend ? '/' : '/#backend'} target="_blank" rel="noopener"
-          aria-label={isBackend ? 'Open Frontend in another window' : 'Open Backend in another window'}>
-          <span>{isBackend ? 'Open Frontend' : 'Open Backend'}</span><ArrowUpRight size={14} aria-hidden="true"/>
-        </a>
+        {savedWorkspaces && <button type="button" className="backend-link" aria-haspopup="dialog" disabled={locked}
+          onClick={()=>openFolderDialog()}><FolderOpen size={16} aria-hidden="true"/>Workspaces</button>}
+        {workspace && <button type="button" className="backend-link" disabled={locked} onClick={()=>openFolderDialog('backend')}>
+          <Network size={16} aria-hidden="true"/>{workspace.backend ? 'Change Backend' : 'Link Backend'}
+        </button>}
         <div className="panel-controls" role="group" aria-label="Workspace panels">
           <button type="button" className="panel-toggle" aria-label="Agent Chat" aria-controls="agent-chat"
             aria-expanded={agentOpen} onClick={()=>setAgentOpen(open=>!open)}>
@@ -936,16 +1037,25 @@ function App() {
         {sidebar === 'git' ? <GitChanges result={gitDiff} selected={gitFile} onSelect={openGitFile}
           onRefresh={()=>perform('Refreshing Git changes…',refreshGit)} onAction={gitAction} onGenerate={generateCommitMessage}
           message={commitMessage} setMessage={message=>{setCommitMessage(message);setCommitMessageError('');}}
-          messageError={commitMessageError} busy={busy} locked={locked} live={workspace?.live}
+          messageError={commitMessageError} pushRejection={pushRejection} busy={busy} locked={locked} live={workspace?.live}
           worktreeBlock={dirty ? 'Save your source changes before changing the working tree.'
             : pending ? 'Resolve the pending edit before changing the working tree.' : ''}/> : <>
         <div className="panel-label"><span>EXPLORER</span><FolderOpen size={15} aria-hidden="true"/></div>
-        <div className="project"><FolderOpen size={15} aria-hidden="true"/><strong title={workspace?.name}>{workspace?.name || 'No folder open'}</strong></div>
+        {backendFolder && <div className="explorer-sides" role="group" aria-label="Explorer folder">
+          <button type="button" aria-pressed={explorerSide === 'frontend'} disabled={!!busy} onClick={()=>setBackendExplorerFolder(null)}>Frontend</button>
+          <button type="button" aria-pressed={explorerSide === 'backend'} disabled={!!busy} onClick={()=>setBackendExplorerFolder(backendFolder)}>Backend</button>
+        </div>}
+        <div className="project"><FolderOpen size={15} aria-hidden="true"/>
+          <strong title={explorerName}>{explorerName || 'No folder open'}</strong>
+        </div>
         {workspace ? <>
-          <label className="search"><Search size={15}/><input aria-label="Filter source files" placeholder="Filter files…" value={filter} onChange={e=>setFilter(e.target.value)}/></label>
-          <FileList files={workspace.files} filter={filter} active={file?.file} onChoose={choose} busy={!!busy}/>
-          <button className="quiet explorer-action" onClick={close} disabled={locked}><Square size={14}/> Close folder</button>
-        </> : <button className="quiet explorer-action" onClick={()=>setImportOpen(true)}><FolderOpen size={16}/> Open Folder</button>}
+          <ProjectFiles key={explorerSide === 'backend' ? backendFolder : workspace.folder} side={explorerSide}
+            active={(file?.side || 'frontend') === explorerSide ? file?.file : null}
+            onChoose={chooseExplorerFile} busy={!!busy}/>
+          <button className="quiet explorer-action" onClick={close} disabled={locked}><Square size={14}/>
+            {backendFolder ? 'Close workspace' : 'Close folder'}
+          </button>
+        </> : <button className="quiet explorer-action" disabled={locked} onClick={()=>openFolderDialog()}><FolderOpen size={16}/> Open Folder</button>}
         <div className="explorer-foot"><Terminal size={15}/><button className="text-button" onClick={()=>setLogOpen(!logOpen)}>Runtime log</button></div>
         </>}
       </aside>
@@ -953,6 +1063,8 @@ function App() {
         <div className="canvas-toolbar">
           <div className="tabs" role="group" aria-label="Workspace view">{views.map(([name,Icon])=>
             <button key={name} className={tab === name ? 'active' : ''} aria-pressed={tab === name} onClick={()=>view(name)} disabled={!!busy}><Icon size={15} aria-hidden="true"/>{name}</button>)}</div>
+          {tab === 'Architecture' && workspace?.backend && <button type="button" className="backend-link"
+            disabled={locked} onClick={unlinkBackend}>Unlink Backend</button>}
           {tab !== 'Database' && tab !== 'Architecture' && <div className="view-actions">
             {ready && tab === 'Preview' && <button type="button" className="icon" aria-label="Refresh preview"
               title="Refresh preview" onClick={refreshPreview}><RefreshCw size={16} aria-hidden="true"/></button>}
@@ -981,31 +1093,44 @@ function App() {
                   <kbd>Esc</kbd>
                 </div>
               </div>
-            </> : <EmptyPreview workspace={workspace} onImport={()=>setImportOpen(true)} onStart={start}
+            </> : <EmptyPreview workspace={workspace} onImport={()=>openFolderDialog()} onStart={start}
               port={port} onPortChange={setPort} busy={locked}/>}
           </div>
           <DatabasePanel api={api} hidden={tab !== 'Database'}/>
-          {workspace?.architecture && <ArchitecturePanel api={api} hidden={tab !== 'Architecture'} projectName={workspace.name}/>}
+          {workspace?.architecture ? <ArchitecturePanel key={workspace.backend?.folder || workspace.folder} api={api}
+            hidden={tab !== 'Architecture'} projectName={workspace.backend?.name || workspace.name}/>
+            : tab === 'Architecture' && <section className="empty-source architecture-empty" aria-label="Architecture">
+              <Network size={28} aria-hidden="true"/>
+              <h2>Link a backend to view its architecture</h2>
+              <p>Choose a Laravel project or a folder with a saved Understand Anything graph.</p>
+              <button type="button" className="primary" disabled={locked} onClick={()=>openFolderDialog('backend')}>Link Backend</button>
+            </section>}
           {tab === 'Source' && <div className="source-box draft-source">
             {file ? <>
               <div className="source-head">
                 <FileCode2 size={16} aria-hidden="true"/>
-                <span className="source-path" title={file.file}>{file.file}</span>
-                <small className={dirty ? 'source-state dirty' : 'source-state'}>{dirty ? 'Unsaved' : 'Saved'}</small>
+                <span className="source-path" title={file.file}>{file.side === 'backend' && 'Backend / '}{file.file}</span>
+                <small className={dirty ? 'source-state dirty' : 'source-state'}>
+                  {file.editable === false ? 'Read only' : dirty ? 'Unsaved' : 'Saved'}
+                </small>
               </div>
               <Suspense fallback={<div className="source-editor" role="status">Loading editor…</div>}>
-                <SourceEditor key={file.file} value={editor} onChange={setEditor} disabled={locked}/>
+                <SourceEditor key={(file.side || 'vue') + ':' + file.file} file={file.file} value={editor}
+                  onChange={setEditor} disabled={locked || file.editable === false}/>
               </Suspense>
               <div className="source-actions">
-                <button className="primary" disabled={!dirty || locked || !!workspace?.pendingEdit} onClick={()=>save(editor)}><Check size={16}/>Save file</button>
-                <button className="quiet" disabled={locked} onClick={formatSource}>Format source</button>
-                <button className="quiet" disabled={dirty || locked || !workspace?.canUndoAgent || !!workspace?.pendingEdit}
-                  onClick={()=>perform('Undoing agent edit…',async () => {
-                    await api('agent-undo'); await refreshDraft();
-                  })}><Undo2 size={16}/>Undo agent edit</button>
-                {!workspace?.live && <button className="quiet" disabled={(!dirty && file.text === file.original) || locked || !!workspace?.pendingEdit} onClick={()=>save(file.original)}>Restore imported</button>}
+                <button className="primary" disabled={!dirty || locked || file.editable === false ||
+                  (file.side !== 'backend' && !!workspace?.pendingEdit)} onClick={()=>save(editor)}><Check size={16}/>Save file</button>
+                {!file.side && <>
+                  <button className="quiet" disabled={locked} onClick={formatSource}>Format source</button>
+                  <button className="quiet" disabled={dirty || locked || !workspace?.canUndoAgent || !!workspace?.pendingEdit}
+                    onClick={()=>perform('Undoing agent edit…',async () => {
+                      await api('agent-undo'); await refreshDraft();
+                    })}><Undo2 size={16}/>Undo agent edit</button>
+                  {!workspace?.live && <button className="quiet" disabled={(!dirty && file.text === file.original) || locked || !!workspace?.pendingEdit} onClick={()=>save(file.original)}>Restore imported</button>}
+                </>}
               </div>
-            </> : <div className="empty-source"><Code2 size={28}/><h2>No file selected</h2><p>Open a preview page or select a Vue file in Explorer.</p></div>}
+            </> : <div className="empty-source"><Code2 size={28}/><h2>No file selected</h2><p>Open a preview page or select a file in Explorer.</p></div>}
           </div>}
           {tab === 'Diff' && <div className="source-box">
             {workspace ? <GitPatch result={gitDiff} selected={gitFile} content={gitContent}/>
@@ -1195,17 +1320,32 @@ function App() {
         </form>}
       </aside>
     </main>
-    <dialog ref={dialog} onCancel={event=>busy ? event.preventDefault() : setImportOpen(false)}>
-      <form onSubmit={importProject}>
-        <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close folder dialog" onClick={()=>setImportOpen(false)} disabled={!!busy}><X size={19}/></button></div>
-        <h2>Open {isBackend ? 'a backend' : 'a frontend'} folder</h2><p>Laravel projects open in Architecture, and Vue projects can run a Vite preview.</p>
-        <label htmlFor="folder">Project folder</label>
+    <dialog ref={dialog} aria-labelledby="folder-dialog-title" onCancel={event=>busy ? event.preventDefault() : setFolderMode(null)}>
+      <form onSubmit={submitFolder}>
+        <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close folder dialog" onClick={()=>setFolderMode(null)} disabled={!!busy}><X size={19}/></button></div>
+        <h2 id="folder-dialog-title">{linkingBackend ? 'Link a backend folder' : savedWorkspaces?.length ? 'Workspaces' : 'Open a project folder'}</h2>
+        <p>{linkingBackend ? 'Studio will use this folder for the Architecture tab in this workspace.'
+          : 'Laravel projects open in Architecture, and Vue projects can run a Vite preview.'}</p>
+        {!linkingBackend && !!savedWorkspaces?.length && <section className="saved-workspaces" aria-labelledby="saved-workspaces-title">
+          <h3 id="saved-workspaces-title">Saved workspaces</h3>
+          <ul>{savedWorkspaces.map(project=><li key={project.folder}>
+            <button type="button" className="quiet" disabled={locked || workspace?.folder === project.folder}
+              aria-current={workspace?.folder === project.folder ? 'true' : undefined} onClick={()=>openFolder(project.folder)}>
+              <FolderOpen size={16} aria-hidden="true"/>
+              <span><strong>{project.name}</strong><small title={project.folder}>{project.folder}</small></span>
+              {workspace?.folder === project.folder && <small>Current</small>}
+            </button>
+          </li>)}</ul>
+        </section>}
+        <label htmlFor="folder">{linkingBackend ? 'Backend folder' : 'Project folder'}</label>
         <button id="folder" className="quiet" type="button" autoFocus aria-describedby="selected-folder" onClick={browseForFolder} disabled={!!busy}>
           <FolderOpen size={16}/>{busy === 'Choosing folder…' ? busy : 'Choose folder'}
         </button>
         <output id="selected-folder" className="selected-folder" aria-live="polite">{folder || 'No folder selected'}</output>
         {notice?.error && <p className="form-error" role="alert">{notice.text}</p>}
-        <button className="primary" disabled={!!busy || !folder}><FolderOpen size={16}/>{busy === 'Opening folder…' ? busy : 'Open Folder'}</button>
+        <button className="primary" disabled={!!busy || !folder}><FolderOpen size={16}/>
+          {busy || (linkingBackend ? 'Link Backend' : 'Open Folder')}
+        </button>
       </form>
     </dialog>
   </>;

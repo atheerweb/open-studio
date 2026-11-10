@@ -1,8 +1,9 @@
 import { once } from 'node:events';
+import { join } from 'node:path';
 import { createStudio } from '../server/studio.mjs';
 
-export async function startDesktopServer(options) {
-  const server = createStudio(options);
+export async function startDesktopServer({store,...options} = {}) {
+  const server = createStudio({store,workspaceFile:store && join(store,'desktop-workspaces.json'),...options});
   const ready = once(server,'listening');
   server.listen(0,'127.0.0.1');
   await ready;

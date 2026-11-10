@@ -64,11 +64,11 @@ export async function projectFiles(root, prefix = '') {
   return result.sort();
 }
 
-export async function atomicWrite(path,data) {
+export async function atomicWrite(path,data,mode) {
   const temporary = path + '.open-studio-' + randomUUID();
   await mkdir(dirname(path),{recursive:true});
   try {
-    await writeFile(temporary,data,{flag:'wx'});
+    await writeFile(temporary,data,{flag:'wx',mode});
     await rename(temporary,path);
   } finally {
     await rm(temporary,{force:true});

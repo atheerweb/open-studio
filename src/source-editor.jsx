@@ -1,9 +1,9 @@
 import React, {useEffect, useRef} from 'react';
 import {basicSetup, EditorView} from 'codemirror';
 import {Compartment, EditorState} from '@codemirror/state';
-import {vue} from '@codemirror/lang-vue';
 import {tags} from '@lezer/highlight';
 import {vscodeDarkInit} from '@uiw/codemirror-theme-vscode';
+import {sourceLanguage} from './source-language.mjs';
 
 const editMode = disabled => [EditorView.editable.of(!disabled),EditorState.readOnly.of(disabled)];
 const studioTheme = vscodeDarkInit({settings:{
@@ -18,17 +18,22 @@ const studioTheme = vscodeDarkInit({settings:{
   gutterForeground:'var(--muted)',
   gutterActiveForeground:'var(--accent)'
 },styles:[
-  {tag:[tags.keyword,tags.controlKeyword,tags.moduleKeyword,tags.operatorKeyword,tags.modifier],color:'var(--syntax-keyword)'},
+  {tag:[tags.keyword,tags.controlKeyword,tags.moduleKeyword,tags.operatorKeyword,tags.modifier,tags.self],color:'var(--syntax-keyword)'},
   {tag:[tags.string,tags.special(tags.string),tags.regexp,tags.escape],color:'var(--syntax-string)'},
-  {tag:[tags.typeName,tags.className,tags.tagName,tags.attributeName,tags.namespace],color:'var(--syntax-type)'},
+  {tag:[tags.typeName,tags.className,tags.tagName,tags.attributeName,tags.namespace,tags.macroName,tags.labelName],color:'var(--syntax-type)'},
   {tag:[tags.number,tags.bool,tags.null,tags.atom,tags.constant(tags.name)],color:'var(--syntax-literal)'},
   {tag:[tags.function(tags.variableName),tags.function(tags.propertyName)],color:'var(--syntax-call)'},
   {tag:[tags.comment,tags.meta,tags.angleBracket],color:'var(--syntax-comment)'},
   {tag:[tags.name,tags.variableName,tags.propertyName,tags.definition(tags.name),tags.operator,tags.punctuation,tags.separator],color:'var(--ink)'},
+  {tag:[tags.heading,tags.strong],fontWeight:'bold'},
+  {tag:tags.emphasis,fontStyle:'italic'},
+  {tag:[tags.link,tags.url],color:'var(--syntax-call)',textDecoration:'underline'},
+  {tag:tags.inserted,color:'var(--success)'},
+  {tag:tags.deleted,color:'var(--error)'},
   {tag:tags.invalid,color:'var(--error)'}
 ]});
 
-export default function SourceEditor({value,onChange,disabled}) {
+export default function SourceEditor({file,value,onChange,disabled}) {
   const host = useRef(null);
   const editor = useRef(null);
   const mode = useRef(new Compartment());
@@ -37,12 +42,13 @@ export default function SourceEditor({value,onChange,disabled}) {
   change.current = onChange;
 
   useEffect(() => {
+    const language = new Compartment();
     const view = new EditorView({
       parent:host.current,
       doc:initial.current.value,
       extensions:[
-        basicSetup,vue(),studioTheme,
-        EditorView.contentAttributes.of({'aria-label':'Vue draft source','spellcheck':'false'}),
+        basicSetup,language.of([]),studioTheme,
+        EditorView.contentAttributes.of({'aria-label':'Source editor','spellcheck':'false'}),
         mode.current.of(editMode(initial.current.disabled)),
         EditorView.updateListener.of(update => {
           if (update.docChanged) {
@@ -53,6 +59,9 @@ export default function SourceEditor({value,onChange,disabled}) {
       ]
     });
     editor.current = view;
+    sourceLanguage(file).then(support => {
+      if (support && editor.current === view) view.dispatch({effects:language.reconfigure(support)});
+    }).catch(() => {});
     return () => { editor.current = null; view.destroy(); };
   },[]);
 

@@ -28,7 +28,7 @@ Open **Source Control** or **Diff** to see staged, unstaged, and untracked files
 
 Use the branch picker at the top of **Source Control** to switch to a local branch or check out a fetched remote branch with tracking. **Pull** updates the current branch from its upstream when it can fast-forward. Save any unsaved editor changes before switching or pulling.
 
-If a push is rejected because the remote branch has new commits, open **More Git actions** and choose **Merge from Remote**. If Git reports conflicts, resolve and stage the files, then commit the merge. **Abort Merge** discards work done to resolve the merge. Push again once the merge is complete.
+If a push is rejected because the remote branch has new commits, choose **Merge & Push** in **Source Control**. Studio fetches and merges the remote branch, then retries the push. If Git reports conflicts, resolve and stage the files, commit the merge, and push again. **Abort Merge** discards work done to resolve the merge. To review the merge before pushing, choose **Merge from Remote** under **More Git actions**.
 
 **Local Commit Changes** shows file changes in local commits since the branch diverged from its last fetched upstream. Use the undo button on a file to create an unstaged reversal, then review, stage, and commit it. The original commits remain in the branch history.
 

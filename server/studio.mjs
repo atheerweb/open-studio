@@ -2,17 +2,19 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { askCodex, listCodexModels, listCodexSkills, reasoningEfforts } from './codex.mjs';
 import { format } from 'prettier';
 import { chooseFrontendFolder } from './folder-picker.mjs';
 import { VueDraft } from './vue-draft.mjs';
-import { LiveWorkspace } from './live-workspace.mjs';
+import { LiveWorkspace, resolveLocalProjectFolder } from './live-workspace.mjs';
 import { readGitDiff } from './git-diff.mjs';
 import { changeGitWorkspace, gitWorkspace, readGitWorkspace, readLocalCommitFile, suggestGitMessage } from './git-actions.mjs';
 import { browseMySql } from './mysql-browser.mjs';
 import { applyPageEdit } from './vue-page.mjs';
 import { openArchitecture } from './architecture.mjs';
+import { atomicWrite, editableFile } from './draft-publish.mjs';
+import { listExplorerFiles, readExplorerFile, writeExplorerFile } from './project-explorer.mjs';
 import { approveDraftTurn, componentUsage, runDraftTurn, undoDraftTurn } from './draft-agent.mjs';
 
 const dist = new URL('../dist/',import.meta.url);
@@ -76,13 +78,84 @@ function chatExcerpt(text = '',limit) {
   return characters.length > limit ? characters.slice(0,limit - 1).join('') + '…' : line;
 }
 
-export function createStudio({ask = askCodex, runAgent, store, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
-  const workspaces = new Map([['frontend',{}],['backend',{}]]);
+export function createStudio({ask = askCodex, runAgent, store, workspaceFile, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
+  let draft;
+  let architecture;
+  let backend;
+  let activeOperation;
   let closing = false;
-  const summary = ({draft,architecture}) => draft ? {
-    name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
+  let savedWorkspaces = [];
+  let workspaceWarning;
+
+  async function saveWorkspace(folder,linkedFolder,active = folder) {
+    if (!workspaceFile) return;
+    const workspaces = folder ? [{folder,backend:linkedFolder},...savedWorkspaces.filter(entry => entry.folder !== folder)] : savedWorkspaces;
+    await atomicWrite(workspaceFile,JSON.stringify({active,workspaces}),0o600);
+    savedWorkspaces = workspaces;
+  }
+
+  async function openLiveWorkspace(folder,{restore = false} = {}) {
+    const source = await resolveLocalProjectFolder(folder);
+    if (draft?.live && draft.source === source) return;
+    const opened = await LiveWorkspace.open(source,store);
+    const projectArchitecture = await openArchitecture(opened.source,store);
+    const savedBackend = savedWorkspaces.find(entry => entry.folder === opened.source)?.backend;
+    let linked;
+    let warning;
+    if (savedBackend) {
+      try {
+        const backendFolder = await resolveLocalProjectFolder(savedBackend);
+        const graph = backendFolder !== opened.source && await openArchitecture(backendFolder,store);
+        if (!graph) throw new Error('The saved backend no longer supports Architecture.');
+        linked = {folder:backendFolder,architecture:graph};
+      } catch {
+        warning = `Could not reopen the linked backend (${savedBackend}).`;
+      }
+    }
+    try {
+      await draft?.close();
+      if (!restore) await saveWorkspace(opened.source,linked?.folder || savedBackend);
+    } catch (failure) {
+      await Promise.all([projectArchitecture?.close(),linked?.architecture.close()]);
+      throw failure;
+    }
+    await Promise.all([architecture?.close(),backend?.architecture.close()]);
+    draft = opened;
+    architecture = projectArchitecture;
+    backend = linked;
+    workspaceWarning = warning;
+  }
+
+  async function restoreWorkspace() {
+    let saved;
+    try {
+      saved = JSON.parse(await readFile(workspaceFile,'utf8'));
+      if (!Array.isArray(saved?.workspaces)) throw new Error('Invalid saved workspaces.');
+    } catch (failure) {
+      if (failure.code !== 'ENOENT') workspaceWarning = 'Could not read saved workspaces.';
+      return;
+    }
+    savedWorkspaces = saved.workspaces.filter(entry => typeof entry?.folder === 'string' && entry.folder &&
+      (entry.backend === undefined || typeof entry.backend === 'string'));
+    if (!savedWorkspaces.some(entry => entry.folder === saved.active)) return;
+    try { await openLiveWorkspace(saved.active,{restore:true}); }
+    catch { workspaceWarning = `Could not reopen the saved workspace (${saved.active}).`; }
+  }
+
+  const restoringWorkspace = workspaceFile && restoreWorkspace();
+  function explorerRoot(side) {
+    if (!draft) throw error(409,'Open a project folder first.');
+    if (side === 'frontend') return draft.directory;
+    if (side !== 'backend') throw error(400,'Choose Frontend or Backend in Explorer.');
+    if (!backend) throw error(409,'Link a backend folder first.');
+    return backend.folder;
+  }
+  const explorerEditable = (side,file) => side === 'backend' || draft.live || editableFile(file);
+  const summary = () => draft ? {
+    name:draft.name,folder:draft.source,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
     live:!!draft.live,canPreview:draft.live ? draft.canPreview : true,
-    ...(architecture && {architecture:true}),
+    ...((backend || architecture) && {architecture:true}),
+    ...(backend && {backend:{name:basename(backend.folder),folder:backend.folder}}),
     dependencyProgress:draft.dependencyProgress,dependencyFallback:draft.dependencyFallback,
     activeSessionId:draft.activeSession.id,
     sessions:draft.sessions.map(({id,messages},index) => ({
@@ -95,6 +168,8 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       blockedFiles:draft.pendingEdit.blockedFiles || [],
       files:draft.pendingEdit.edits.map(edit => edit.file)}
   } : null;
+  const workspaceState = () => ({workspace:summary(),
+    ...(workspaceFile && {savedWorkspaces:savedWorkspaces.map(({folder}) => ({name:basename(folder),folder})),workspaceWarning})});
   const server = createServer(async (request,response) => {
     response.setHeader('Cache-Control','no-store');
     response.setHeader('X-Content-Type-Options','nosniff');
@@ -104,7 +179,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       response.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});
       response.end(JSON.stringify(body));
     };
-    const port = server.address().port;
+    const port = request.socket.localPort;
     const studioHost = 'localhost:' + port;
     const legacyHost = '127.0.0.1:' + port;
     const host = request.headers.host;
@@ -134,15 +209,11 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
     if (request.method !== 'POST' || request.url !== '/api/vue') return send(404,{error:'Route not found.'});
     if (request.headers.origin !== 'http://' + host) return send(403,{error:'Invalid origin.'});
     if (request.headers['content-type'] !== 'application/json') return send(415,{error:'Use a JSON request.'});
-    let workspace;
     let finishOperation;
     try {
       const input = await readRequest(request);
-      const workspaceRole = input?.workspace === undefined ? 'frontend' : input.workspace;
-      workspace = workspaces.get(workspaceRole);
-      if (!workspace) throw error(400,'Choose the frontend or backend workspace.');
-      const {draft,architecture,activeOperation} = workspace;
-      if (input?.action === 'status') return send(200,{workspace:summary(workspace)});
+      await restoringWorkspace;
+      if (input?.action === 'status') return send(200,workspaceState());
       if (input?.action === 'agent-skills') return send(200,{skills:await listSkills(draft?.directory || process.cwd())});
       if (input?.action === 'resolve') {
         const route = normalizeRoute(input.route);
@@ -165,20 +236,23 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
       }
       if (closing) throw error(503,'Open Studio is shutting down.');
       if (input?.action === 'database') return send(200,await browseMySql(input.connection,input.table,input.update));
-      if (['architecture-status','architecture-refresh','architecture-source','architecture-terminal','architecture-ai'].includes(input?.action)) {
-        if (!architecture) throw error(409,'Open a Laravel folder or a project with a saved Understand Anything graph.');
+      if (['explorer-files','explorer-read'].includes(input?.action)) {
+        const root = explorerRoot(input.side);
+        if (input.action === 'explorer-files') return send(200,await listExplorerFiles(root));
+        const editable = explorerEditable(input.side,input.file);
+        return send(200,{...await readExplorerFile(root,input.file),editable});
+      }
+      const graphProject = backend?.architecture || architecture;
+      if (['architecture-status','architecture-refresh','architecture-source','architecture-terminal'].includes(input?.action)) {
+        if (!graphProject) throw error(409,'Open or link a Laravel folder or a project with a saved Understand Anything graph.');
         if (input.action === 'architecture-source') {
-          const source = await architecture.read(input.source);
+          const source = await graphProject.read(input.source);
           if (!source) throw error(404,'Source evidence is no longer available.');
           return send(200,source);
         }
-        if (input.action === 'architecture-terminal') return send(200,{command:await architecture.terminalCommand()});
-        if (input.action === 'architecture-ai') {
-          if (input.enabled !== false && input.approved !== true) throw error(403,'Approve sharing project source with Codex first.');
-          await architecture.enableAI(input.enabled !== false);
-        }
-        if (input.action === 'architecture-refresh') architecture.refresh({retry:true});
-        return send(200,architecture.status());
+        if (input.action === 'architecture-terminal') return send(200,{command:await graphProject.terminalCommand()});
+        if (input.action === 'architecture-refresh') graphProject.refresh({retry:true});
+        return send(200,graphProject.status());
       }
       if (activeOperation) {
         if (activeOperation.action !== 'agent-turn' || !agentInspectionActions.has(input?.action)) {
@@ -186,28 +260,48 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
         }
       } else {
         const done = new Promise(resolve => { finishOperation = resolve; });
-        workspace.activeOperation = {action:input?.action,done};
+        activeOperation = {action:input?.action,done};
       }
       if (input?.action === 'pick-folder') {
-        return send(200,{folder:await pickFolder(workspaceRole)});
+        return send(200,{folder:await pickFolder()});
       }
       if (['open','import'].includes(input?.action)) {
-        if (draft) throw error(409,'Close the current project before opening another folder.');
-        if (input.action === 'import' && workspaceRole === 'backend') throw error(400,'Import Vue drafts in the frontend workspace.');
-        const opened = await (input.action === 'open' ? LiveWorkspace : VueDraft).open(input.folder,store);
-        if (opened.live && [...workspaces.values()].some(({draft}) => draft?.live && draft.source === opened.source)) {
-          throw error(409,'This folder is already open in the other workspace.');
+        if (draft && !(workspaceFile && input.action === 'open' && input.replace === true)) {
+          throw error(409,'Close the current project before opening another folder.');
         }
-        workspace.draft = opened;
-        try {
-          if (opened.live) workspace.architecture = await openArchitecture(opened.source,store);
-        } catch (failure) {
-          workspace.draft = undefined;
-          throw failure;
-        }
+        if (input.action === 'open') await openLiveWorkspace(input.folder);
+        else draft = await VueDraft.open(input.folder,store);
       } else {
-        if (!draft) throw error(409,'Import a Vue folder first.');
+        if (!draft) throw error(409,'Open a project folder first.');
         switch (input?.action) {
+          case 'link-backend': {
+            const folder = await resolveLocalProjectFolder(input.folder);
+            if (folder === backend?.folder) break;
+            if (folder === draft.source) throw error(400,'Choose a separate backend folder.');
+            const linked = await openArchitecture(folder,store);
+            if (!linked) throw error(400,'Choose a Laravel folder or a project with a saved Understand Anything graph.');
+            try {
+              if (draft.live) await saveWorkspace(draft.source,folder);
+            } catch (failure) {
+              await linked.close();
+              throw failure;
+            }
+            await backend?.architecture.close();
+            backend = {folder,architecture:linked};
+            workspaceWarning = undefined;
+            break;
+          }
+          case 'unlink-backend':
+            if (draft.live) await saveWorkspace(draft.source);
+            await backend?.architecture.close();
+            backend = undefined;
+            workspaceWarning = undefined;
+            break;
+          case 'architecture-ai':
+            if (!graphProject) throw error(409,'Open or link a Laravel folder or a project with a saved Understand Anything graph.');
+            if (input.enabled !== false && input.approved !== true) throw error(403,'Approve sharing project source with Codex first.');
+            await graphProject.enableAI(input.enabled !== false);
+            return send(200,graphProject.status());
           case 'start':
             if (input.approved !== true) throw error(403,'Approve the startup command first.');
             await draft.installBridge('http://' + studioHost);
@@ -227,6 +321,12 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'write':
             if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before saving.');
             return send(200,await draft.write(input.file,input.hash,input.text));
+          case 'explorer-write': {
+            const root = explorerRoot(input.side);
+            if (!explorerEditable(input.side,input.file)) throw error(403,'This file is read only.');
+            if (input.side === 'frontend' && draft.pendingEdit) throw error(409,'Decide on the pending component changes before saving.');
+            return send(200,{...await writeExplorerFile(root,input.file,input.hash,input.text),editable:true});
+          }
           case 'chat': return send(200,await editPage(draft,input,ask));
           case 'agent-session': {
             if (draft.pendingEdit) throw error(409,'Approve or decline the pending changes before switching sessions.');
@@ -286,6 +386,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'git-switch':
           case 'git-pull':
           case 'git-merge-upstream':
+          case 'git-merge-and-push':
           case 'git-abort-merge':
           case 'git-discard':
             if (!draft.live) throw error(409,'Open the original project before running Git actions.');
@@ -294,7 +395,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             if (input.action === 'git-abort-merge' && input.approved !== true) throw error(403,'Confirm that you want to abort the merge.');
             try {
               await changeGitWorkspace(draft.source,input);
-              if (['git-switch','git-pull','git-merge-upstream'].includes(input.action)) architecture?.refresh();
+              if (['git-switch','git-pull','git-merge-upstream','git-merge-and-push'].includes(input.action)) architecture?.refresh();
             } finally {
               await draft.refreshFiles();
             }
@@ -323,30 +424,32 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             break;
           case 'close':
             await draft.close();
-            await architecture?.close();
-            workspace.architecture = undefined;
-            workspace.draft = undefined;
+            if (draft.live) await saveWorkspace(null,undefined,null);
+            await Promise.all([architecture?.close(),backend?.architecture.close()]);
+            architecture = undefined;
+            backend = undefined;
+            draft = undefined;
+            workspaceWarning = undefined;
             break;
           default: throw error(400,'Unknown workspace action.');
         }
       }
-      return send(200,{workspace:summary(workspace)});
+      return send(200,workspaceState());
     } catch (failure) {
-      return send(failure.status || 422,{error:failure.message,...(failure.committed && {committed:true})});
+      return send(failure.status || 422,{error:failure.message,...(failure.committed && {committed:true}),
+        ...(failure.rejectedPushBranch && {rejectedPushBranch:failure.rejectedPushBranch})});
     } finally {
       if (finishOperation) {
-        workspace.activeOperation = undefined;
+        activeOperation = undefined;
         finishOperation();
       }
     }
   });
   server.closeWorkspace = async () => {
     closing = true;
-    await Promise.all([...workspaces.values()].map(async workspace => {
-      await workspace.activeOperation?.done;
-      try { await workspace.architecture?.close(); }
-      finally { await workspace.draft?.close(); }
-    }));
+    await restoringWorkspace;
+    await activeOperation?.done;
+    await Promise.all([architecture?.close(),backend?.architecture.close(),draft?.close()]);
   };
   return server;
 }

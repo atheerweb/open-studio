@@ -95,6 +95,7 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
     await call('git-stage',{group:'unstaged',path:file});
     const failed = await call('git-commit-and-push',{message:'Keep local commit'},422);
     assert.equal(failed.committed,true);
+    assert.equal(failed.rejectedPushBranch,undefined);
     assert.match(failed.error,/Commit created\. Push failed/);
     assert.equal(git(source,'log','-1','--format=%s'),'Keep local commit');
     await call('close');
@@ -150,13 +151,24 @@ test('switches branches, pulls fast-forwards, and recovers a rejected push while
     const diff = await call('git-diff');
     assert.equal(diff.branch,'feature/preview');
     assert.equal(diff.upstream,'origin/feature/preview');
+    assert.equal(diff.incomingCommits,0);
 
     await writeFile(join(writer,'src/Preview.vue'),'<template>Remote update</template>');
     git(writer,'commit','-am','Update feature component');
     git(writer,'push','origin','feature/preview');
+    const updatedHead = git(writer,'rev-parse','HEAD');
+    const updatedAt = git(writer,'log','-1','--format=%cI');
+    const fetched = await call('git-fetch');
+    assert.equal(fetched.incomingCommits,1);
+    assert.equal(fetched.remoteBranchUpdatedAt['origin/feature/preview'],updatedAt);
+    assert.equal(fetched.graph[0].hash,updatedHead);
+    assert.equal(fetched.graph[0].subject,'Update feature component');
+    assert.match(fetched.graph[0].refs,/origin\/feature\/preview/);
+    assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Feature</template>');
     await call('git-pull',{branch:'main'},409);
     await call('git-pull',{branch:'feature/preview'});
     assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Remote update</template>');
+    assert.equal((await call('git-diff')).incomingCommits,0);
 
     git(source,'config','user.name','Studio Test');
     git(source,'config','user.email','studio@example.test');
@@ -171,10 +183,15 @@ test('switches branches, pulls fast-forwards, and recovers a rejected push while
     git(writer,'push','origin','feature/preview');
 
     const rejected = await call('git-push',{},422);
-    assert.match(rejected.error,/Merge from Remote/);
+    assert.equal(rejected.rejectedPushBranch,'feature/preview');
+    assert.match(rejected.error,/Merge & Push/);
     await call('git-pull',{branch:'feature/preview'},422);
     assert.equal(git(source,'rev-parse','HEAD'),localHead);
-    const {committed,localCommitRange} = await call('git-diff');
+    const {committed,localCommitRange,incomingCommits,graph} = await call('git-diff');
+    assert.equal(incomingCommits,1);
+    assert.ok(graph.some(row=>row.hash === localHead));
+    assert.ok(graph.some(row=>row.hash === remoteHead));
+    assert.ok(graph.some(row=>row.lanes.includes('|')));
     assert.deepEqual(committed,[{status:'A',path:unwanted}]);
     const undo = {group:'committed',path:unwanted,localCommitRange};
     assert.match((await call('git-file',undo)).patch,/\+Accidental local file/);
@@ -192,24 +209,31 @@ test('switches branches, pulls fast-forwards, and recovers a rejected push while
 
     await call('git-merge-upstream',{branch:'main'},409);
     git(source,'branch','--unset-upstream');
-    await call('git-merge-upstream',{branch:'feature/preview'});
+    assert.equal((await call('git-diff')).incomingCommits,null);
+    await call('git-merge-and-push',{branch:'main'},409);
+    assert.equal(git(remote,'rev-parse','refs/heads/feature/preview'),remoteHead);
+    await call('git-merge-and-push',{branch:'feature/preview'});
     git(source,'merge-base','--is-ancestor',localHead,'HEAD');
     git(source,'merge-base','--is-ancestor',remoteHead,'HEAD');
     assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Divergent remote update</template>');
-    await call('git-push');
     assert.equal(git(remote,'rev-parse','refs/heads/feature/preview'),git(source,'rev-parse','HEAD'));
     assert.throws(()=>git(remote,'cat-file','-e','refs/heads/feature/preview:'+unwanted));
     assert.equal((await call('git-diff')).upstream,'origin/feature/preview');
 
     await writeFile(join(source,'src/Preview.vue'),'<template>Local commit for conflict</template>');
-    await call('git-merge-upstream',{branch:'feature/preview'},409);
-    git(source,'commit','-am','Conflicting local commit');
-    const preMerge = git(source,'rev-parse','HEAD');
+    await call('git-merge-and-push',{branch:'feature/preview'},409);
     git(writer,'pull','--ff-only','origin','feature/preview');
     await writeFile(join(writer,'src/Preview.vue'),'<template>Remote commit for conflict</template>');
     git(writer,'commit','-am','Conflicting remote commit');
     git(writer,'push','origin','feature/preview');
-    await call('git-merge-upstream',{branch:'feature/preview'},409);
+    const conflictingRemote = git(writer,'rev-parse','HEAD');
+    await call('git-stage',{group:'unstaged',path:'src/Preview.vue'});
+    const rejectedCommit = await call('git-commit-and-push',{message:'Conflicting local commit'},422);
+    assert.equal(rejectedCommit.committed,true);
+    assert.equal(rejectedCommit.rejectedPushBranch,'feature/preview');
+    const preMerge = git(source,'rev-parse','HEAD');
+    await call('git-merge-and-push',{branch:'feature/preview'},409);
+    assert.equal(git(remote,'rev-parse','refs/heads/feature/preview'),conflictingRemote);
     const conflict = await call('git-diff');
     assert.equal(conflict.mergeInProgress,true);
     assert.deepEqual(conflict.unstaged,[{status:'U',path:'src/Preview.vue'}]);
