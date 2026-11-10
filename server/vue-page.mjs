@@ -89,7 +89,7 @@ function previewBridge(studioOrigin) {
       if (node.id) break;
     }
     return {component:component?.type?.__file || component?.vnode?.type?.__file || null,
-      componentName:name,element:{tag:element.localName,id:(element.id || '').slice(0,120),
+      componentName:name,markup:element.outerHTML?.slice(0,4001),element:{tag:element.localName,id:(element.id || '').slice(0,120),
         path:path.join(' > ').slice(0,250),label:(element.getAttribute('aria-label') ||
         element.textContent || '').trim().replace(/\s+/g,' ').slice(0,160)}};
   };
@@ -98,6 +98,7 @@ function previewBridge(studioOrigin) {
   window.addEventListener('message',event => {
     if (event.source !== parent || event.origin !== studioOrigin) return;
     if (event.data?.type === 'studio-vue-hello') update(true);
+    if (event.data?.type === 'studio-vue-reload') location.reload();
     if (event.data?.type === 'studio-vue-pick') {
       picking = event.data.active === true;
       touchStart = undefined;

@@ -9,9 +9,10 @@ import { chooseFrontendFolder } from './folder-picker.mjs';
 import { VueDraft } from './vue-draft.mjs';
 import { LiveWorkspace } from './live-workspace.mjs';
 import { readGitDiff } from './git-diff.mjs';
-import { changeGitWorkspace, gitWorkspace, readGitWorkspace } from './git-actions.mjs';
+import { changeGitWorkspace, gitWorkspace, readGitWorkspace, suggestGitMessage } from './git-actions.mjs';
+import { browseMySql } from './mysql-browser.mjs';
 import { applyPageEdit } from './vue-page.mjs';
-import { approveDraftTurn, runDraftTurn, undoDraftTurn } from './draft-agent.mjs';
+import { approveDraftTurn, componentUsage, runDraftTurn, undoDraftTurn } from './draft-agent.mjs';
 
 const dist = new URL('../dist/',import.meta.url);
 const error = (status,message) => Object.assign(new Error(message),{status});
@@ -66,21 +67,31 @@ async function editPage(draft,input,ask) {
 }
 
 const defaultStore = () => process.env.OPEN_STUDIO_DRAFTS_DIR || join(homedir(),'.open-studio','drafts');
+const agentInspectionActions = new Set(['read','review','git-diff','git-file','agent-models']);
+
+function chatExcerpt(text = '',limit) {
+  const line = text.trim().replace(/\s+/g,' ');
+  const characters = Array.from(line);
+  return characters.length > limit ? characters.slice(0,limit - 1).join('') + '…' : line;
+}
 
 export function createStudio({ask = askCodex, runAgent, store, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
   let draft;
-  let busy = false;
+  let activeOperation;
+  let closing = false;
   const summary = () => draft ? {
     name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
     live:!!draft.live,canPreview:draft.live ? draft.canPreview : true,
     dependencyProgress:draft.dependencyProgress,dependencyFallback:draft.dependencyFallback,
     activeSessionId:draft.activeSession.id,
     sessions:draft.sessions.map(({id,messages},index) => ({
-      id,title:messages.find(message => message.author === 'You')?.text.trim().replace(/\s+/g,' ').slice(0,60) || 'Session ' + (index + 1)
+      id,title:chatExcerpt(messages.find(message => message.author === 'You')?.text,60) || 'Session ' + (index + 1),
+      preview:chatExcerpt(messages.at(-1)?.text,140)
     })),
     messages:draft.messages,agentActivity:draft.agentActivity,agentSteps:draft.agentSteps || [],
     canUndoAgent:!!draft.lastAgentEdits?.length,
     pendingEdit:draft.pendingEdit && {id:draft.pendingEdit.id,impacts:draft.pendingEdit.impacts,
+      blockedFiles:draft.pendingEdit.blockedFiles || [],
       files:draft.pendingEdit.edits.map(edit => edit.file)}
   } : null;
   const server = createServer(async (request,response) => {
@@ -122,7 +133,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
     if (request.method !== 'POST' || request.url !== '/api/vue') return send(404,{error:'Route not found.'});
     if (request.headers.origin !== 'http://' + host) return send(403,{error:'Invalid origin.'});
     if (request.headers['content-type'] !== 'application/json') return send(415,{error:'Use a JSON request.'});
-    let ownsLock = false;
+    let finishOperation;
     try {
       const input = await readRequest(request);
       if (input?.action === 'status') return send(200,{workspace:summary()});
@@ -142,10 +153,20 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
         const byName = files.filter(file => file.split('/').at(-1).slice(0,-4).toLowerCase() === shortName);
         const selected = byPath[0] || (byName.length === 1 ? byName[0] : null);
         const file = selected || draft?.pageFile(route) || null;
-        return send(200,input.selection ? {file,componentResolved:!!selected} : {file});
+        if (!input.selection) return send(200,{file});
+        const usage = selected && await componentUsage(draft,selected).catch(() => null);
+        return send(200,{file,componentResolved:!!selected,...(selected && {usage})});
       }
-      if (busy) throw error(409,'The workspace is busy. Try again.');
-      busy = ownsLock = true;
+      if (closing) throw error(503,'Open Studio is shutting down.');
+      if (input?.action === 'database') return send(200,await browseMySql(input.connection,input.table,input.update));
+      if (activeOperation) {
+        if (activeOperation.action !== 'agent-turn' || !agentInspectionActions.has(input?.action)) {
+          throw error(409,'The workspace is busy. Try again.');
+        }
+      } else {
+        const done = new Promise(resolve => { finishOperation = resolve; });
+        activeOperation = {action:input?.action,done};
+      }
       if (input?.action === 'pick-folder') {
         return send(200,{folder:await pickFolder()});
       }
@@ -206,7 +227,7 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'agent-models': return send(200,{models:await listCodexModels(draft.directory)});
           case 'agent-approval':
             if (typeof input.approved !== 'boolean') throw error(400,'Choose whether to approve the edit.');
-            await approveDraftTurn(draft,input.id,input.approved);
+            await approveDraftTurn(draft,input.id,input.approved,input.revise === true);
             break;
           case 'agent-undo':
             await undoDraftTurn(draft);
@@ -222,8 +243,24 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
             if (!root) throw error(400,'Open a Git working tree first.');
             return send(200,await readGitDiff(root,{group,path,previousPath}));
           }
+          case 'git-generate-message':
+            if (!draft.live) throw error(409,'Open the original project to generate a commit message.');
+            if (input.approved !== true) throw error(403,'Choose to share the staged diff with Codex first.');
+            return send(200,await suggestGitMessage(draft.source,ask));
+          case 'git-switch':
+          case 'git-pull':
+            if (!draft.live) throw error(409,'Open the original project before running Git actions.');
+            if (draft.pendingEdit) throw error(409,'Decide on the pending component changes before switching or pulling.');
+            try {
+              await changeGitWorkspace(draft.source,input);
+            } finally {
+              await draft.refreshFiles();
+            }
+            break;
           case 'git-stage':
           case 'git-unstage':
+          case 'git-stage-all':
+          case 'git-unstage-all':
           case 'git-commit':
           case 'git-commit-and-push':
           case 'git-push':
@@ -252,10 +289,17 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
     } catch (failure) {
       return send(failure.status || 422,{error:failure.message,...(failure.committed && {committed:true})});
     } finally {
-      if (ownsLock) busy = false;
+      if (finishOperation) {
+        activeOperation = undefined;
+        finishOperation();
+      }
     }
   });
-  server.closeWorkspace = async () => { await draft?.close(); };
+  server.closeWorkspace = async () => {
+    closing = true;
+    await activeOperation?.done;
+    await draft?.close();
+  };
   return server;
 }
 

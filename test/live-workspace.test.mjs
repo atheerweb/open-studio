@@ -14,7 +14,12 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
   const remote = join(root,'remote.git');
   const file = 'src/App.vue';
   const git = (cwd,...args) => execFileSync('git',args,{cwd,encoding:'utf8',stdio:'pipe'}).trim();
-  const app = createStudio({ask:async () => ({message:'Updated',patch:{find:'Saved',replace:'Accepted'}})});
+  const commitRequests = [];
+  const app = createStudio({ask:async (prompt,input,options) => {
+    if (input.source) return {message:'Updated',patch:{find:'Saved',replace:'Accepted'}};
+    commitRequests.push({input,options});
+    return {message:'  Update the page  ',patch:null};
+  }});
   try {
     await mkdir(join(source,'src'),{recursive:true});
     await writeFile(join(source,'package.json'),JSON.stringify({dependencies:{vue:'fixture'},scripts:{dev:'vite'}}));
@@ -40,12 +45,28 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
     await call('chat',{route:'/',file,prompt:'Update the page',approved:true});
     assert.match(await readFile(join(source,file),'utf8'),/Accepted/);
     await call('git-commit',{message:'   '},400);
+    await call('git-generate-message',{},403);
+    await call('git-generate-message',{approved:true},400);
+    assert.equal(commitRequests.length,0);
     await call('git-stage',{group:'untracked',path:'src'},400);
     await call('git-stage',{group:'untracked',path:file});
     await call('git-unstage',{group:'staged',path:file});
     assert.deepEqual((await call('git-diff')).staged,[]);
+    await call('git-stage-all');
+    assert.deepEqual((await call('git-diff')).staged.map(change=>change.path),['package.json',file]);
+    await call('git-unstage-all');
+    assert.deepEqual((await call('git-diff')).staged,[]);
     await call('git-stage',{group:'untracked',path:file});
-    await call('git-commit',{message:'Update the page'});
+    await writeFile(join(source,file),'<template>Unstaged draft</template>');
+    const suggestion = await call('git-generate-message',{approved:true});
+    assert.deepEqual(suggestion,{message:'Update the page'});
+    assert.equal(commitRequests.length,1);
+    assert.equal(commitRequests[0].options?.disableTools,true);
+    assert.match(commitRequests[0].input.patch,/Accepted/);
+    assert.doesNotMatch(commitRequests[0].input.patch,/Unstaged draft|package\.json/);
+    assert.equal(git(source,'status','--short'),['AM '+file,'?? package.json'].join('\n'));
+    await writeFile(join(source,file),'<template>Accepted</template>');
+    await call('git-commit',suggestion);
     assert.match(git(source,'show','HEAD:'+file),/Accepted/);
     assert.equal(git(source,'status','--short'),'?? package.json');
     await call('git-push');
@@ -69,15 +90,97 @@ test('opens the working tree, stages selected changes, commits and pushes the cu
   }
 });
 
+test('switches local and remote branches and pulls upstream changes without merging divergent history', async () => {
+  const root = await mkdtemp(join(tmpdir(),'open-studio-branches-'));
+  const source = join(root,'repo');
+  const remote = join(root,'remote.git');
+  const writer = join(root,'writer');
+  const git = (cwd,...args) => execFileSync('git',args,{cwd,encoding:'utf8',stdio:'pipe'}).trim();
+  const app = createStudio();
+  try {
+    git(root,'init','--bare','-b','main',remote);
+    git(root,'clone',remote,writer);
+    git(writer,'config','user.name','Studio Test');
+    git(writer,'config','user.email','studio@example.test');
+    await mkdir(join(writer,'src'));
+    await writeFile(join(writer,'src/App.vue'),'<template>Main</template>');
+    git(writer,'add','.');
+    git(writer,'commit','-m','Initial component');
+    git(writer,'push','origin','main');
+    git(writer,'switch','-c','feature/preview');
+    await writeFile(join(writer,'package.json'),JSON.stringify({dependencies:{vue:'fixture'},scripts:{dev:'vite'}}));
+    await writeFile(join(writer,'src/Preview.vue'),'<template>Feature</template>');
+    git(writer,'add','.');
+    git(writer,'commit','-m','Add feature component');
+    git(writer,'push','origin','feature/preview');
+    git(root,'clone',remote,source);
+    await new Promise((resolve,reject)=>app.once('error',reject).listen(0,'127.0.0.1',resolve));
+    const origin = 'http://127.0.0.1:' + app.address().port;
+    async function call(action,input = {},status = 200) {
+      const response = await fetch(origin+'/api/vue',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},
+        body:JSON.stringify({action,...input})});
+      const result = await response.json();
+      assert.equal(response.status,status,JSON.stringify(result));
+      return result;
+    }
+    await call('open',{folder:source});
+    assert.deepEqual((await call('git-diff')).branches,{
+      local:['main'],remote:['origin/feature/preview','origin/main']
+    });
+    await call('git-switch',{ref:'HEAD~1'},400);
+    const {workspace} = await call('git-switch',{ref:'refs/remotes/origin/feature/preview'});
+    assert.deepEqual(workspace.files,['src/App.vue','src/Preview.vue']);
+    assert.equal(workspace.canPreview,true);
+    const diff = await call('git-diff');
+    assert.equal(diff.branch,'feature/preview');
+    assert.equal(diff.upstream,'origin/feature/preview');
+
+    await writeFile(join(writer,'src/Preview.vue'),'<template>Remote update</template>');
+    git(writer,'commit','-am','Update feature component');
+    git(writer,'push','origin','feature/preview');
+    await call('git-pull',{branch:'main'},409);
+    await call('git-pull',{branch:'feature/preview'});
+    assert.equal((await call('read',{file:'src/Preview.vue'})).text,'<template>Remote update</template>');
+
+    git(source,'-c','user.name=Studio Test','-c','user.email=studio@example.test','commit','--allow-empty','-m','Local commit');
+    const localHead = git(source,'rev-parse','HEAD');
+    git(writer,'commit','--allow-empty','-m','Remote commit');
+    git(writer,'push','origin','feature/preview');
+    await call('git-pull',{branch:'feature/preview'},422);
+    assert.equal(git(source,'rev-parse','HEAD'),localHead);
+
+    await writeFile(join(source,'src/Preview.vue'),'<template>Local changes</template>');
+    await call('git-switch',{ref:'refs/heads/main'},422);
+    assert.match(await readFile(join(source,'src/Preview.vue'),'utf8'),/Local changes/);
+    git(source,'restore','--','src/Preview.vue');
+    const switchedBack = (await call('git-switch',{ref:'refs/heads/main'})).workspace;
+    assert.deepEqual(switchedBack.files,['src/App.vue']);
+    assert.equal(switchedBack.canPreview,false);
+    assert.equal(git(source,'branch','--show-current'),'main');
+  } finally {
+    await app.closeWorkspace();
+    if (app.listening) await new Promise(resolve=>app.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
 test('live preview loads the project Vite config without writing a bridge into the project', async () => {
   const root = await mkdtemp(join(tmpdir(),'open-studio-live-preview-'));
   let workspace;
   try {
-    await mkdir(join(root,'node_modules'));
-    await symlink(await realpath('node_modules/vite'),join(root,'node_modules','vite'),
+    const modules = join(root,'node_modules');
+    const vite = join(modules,'vite');
+    await mkdir(vite,{recursive:true});
+    await symlink(await realpath('node_modules/vite'),join(modules,'vite-runtime'),
       process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(join(vite,'package.json'),JSON.stringify({main:'./esm.mjs',exports:{
+      '.':{import:{default:'./esm.mjs'},require:'./index.cjs'},'./package.json':'./package.json'
+    }}));
+    await writeFile(join(vite,'index.cjs'),'module.exports = {};');
+    await writeFile(join(vite,'esm.mjs'),
+      "export {loadConfigFromFile,mergeConfig} from '../vite-runtime/dist/node/index.js';");
     await writeFile(join(root,'package.json'),JSON.stringify({dependencies:{vue:'fixture'},
-      scripts:{dev:'node node_modules/vite/bin/vite.js'}}));
+      scripts:{dev:'node node_modules/vite-runtime/bin/vite.js'}}));
     const html = '<html><head></head><body>Original</body></html>';
     await writeFile(join(root,'index.html'),html);
     await writeFile(join(root,'vite.config.mjs'),`export default {plugins:[{

@@ -4,7 +4,7 @@ import test from 'node:test';
 import { lstat, mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { askCodex } from '../server/codex.mjs';
+import { askCodex, codexArgs } from '../server/codex.mjs';
 import { createStudio } from '../server/studio.mjs';
 import { VueDraft } from '../server/vue-draft.mjs';
 import { bridgeFile } from '../server/draft-publish.mjs';
@@ -86,7 +86,7 @@ test('import makes source available without copying installed dependencies', asy
 
 test('Codex receives a structured prompt in a temporary read-only run', async () => {
   const input = {route:'/dashboard',source:'<h1>Before</h1>'};
-  const result = await askCodex('Return a patch.',input,async (args,prompt,cwd) => {
+  const result = await askCodex('Return a patch.',input,{execute:async (args,prompt,cwd) => {
     assert.deepEqual(args.slice(0,5),['--ask-for-approval','never','exec','--sandbox','read-only']);
     assert.ok(args.includes('--ephemeral'));
     assert.equal(args.at(-1),'-');
@@ -96,8 +96,16 @@ test('Codex receives a structured prompt in a temporary read-only run', async ()
     const out = args[args.indexOf('--output-last-message')+1];
     assert.equal(dirname(out),cwd);
     await writeFile(out,JSON.stringify({message:'Updated',patch:{find:'Before',replace:'After'}}));
-  });
+  }});
   assert.equal(result.patch.replace,'After');
+});
+
+test('commit message generation disables Codex shell execution and web search', () => {
+  const args = codexArgs('schema.json','result.json',{disableTools:true});
+  for (const feature of ['shell_tool','code_mode_host','multi_agent','browser_use','apps']) {
+    assert.equal(args[args.indexOf(feature)-1],'--disable');
+  }
+  assert.equal(args[args.indexOf('web_search=disabled')-1],'-c');
 });
 
 test('page chat checks consent, resolves the route and edits only the draft', async () => {
@@ -110,8 +118,11 @@ test('page chat checks consent, resolves the route and edits only the draft', as
   await mkdir(join(root,'src','router'),{recursive:true});
   await writeFile(join(root,'package.json'),JSON.stringify({scripts:{dev:'vite'},dependencies:{vue:'fixture'}}));
   const original = join(root,'src','Dashboard.vue');
-  await writeFile(original,'<template>Before</template>');
-  await writeFile(join(root,'src','router','index.js'),"export default [{path:'/dashboard',component:()=>import('../Dashboard.vue')}]");
+  const dashboard = "<script setup>import Panel from './Panel.vue'</script><template>Before<Panel /></template>";
+  await writeFile(original,dashboard);
+  await writeFile(join(root,'src','Panel.vue'),"<script setup>import Badge from './Badge.vue'; import AlsoBadge from './Badge.vue'</script><template><Badge /><AlsoBadge /></template>");
+  await writeFile(join(root,'src','Badge.vue'),'<template><span>Badge</span></template>');
+  await writeFile(join(root,'src','router','index.js'),"export default [{path:'/dashboard',component:()=>import('../Dashboard.vue')},{path:'/other',component:()=>import('../Dashboard.vue')}]");
   await new Promise((resolve,reject)=>app.once('error',reject).listen(0,'127.0.0.1',resolve));
   const url = 'http://127.0.0.1:' + app.address().port;
   const call = (action, data = {}, origin = url) => fetch(url+'/api/vue',{method:'POST',
@@ -130,7 +141,7 @@ test('page chat checks consent, resolves the route and edits only the draft', as
     assert.equal(gitChanges.staged[0].path,'src/Dashboard.vue');
     assert.equal(gitChanges.staged[0].status,'A');
     const staged = await (await call('git-file',{group:'staged',path:'src/Dashboard.vue'})).json();
-    assert.match(staged.patch,/\+<template>Before<\/template>/);
+    assert.ok(staged.patch.includes('+' + dashboard));
     assert.equal(gitChanges.unstaged[0].path,'src/Dashboard.vue');
     assert.equal(gitChanges.unstaged[0].status,'M');
     const unstaged = await (await call('git-file',{group:'unstaged',path:'src/Dashboard.vue'})).json();
@@ -138,18 +149,68 @@ test('page chat checks consent, resolves the route and edits only the draft', as
     assert.ok(gitChanges.untracked.includes('untracked.txt'));
     assert.deepEqual(await (await call('git-file',{group:'untracked',path:'untracked.txt'})).json(),{text:'New file'});
     assert.equal((await call('git-file',{group:'unstaged',path:'../outside'})).status,400);
-    await writeFile(original,'<template>Before</template>');
+    await writeFile(original,dashboard);
     assert.deepEqual(await (await call('resolve',{route:'/dashboard'})).json(),{file:'src/Dashboard.vue'});
+    assert.deepEqual(await (await call('resolve',{route:'/dashboard',componentName:'Badge',selection:true})).json(),
+      {file:'src/Badge.vue',componentResolved:true,usage:{pages:2,files:1}});
+    assert.deepEqual(await (await call('resolve',{route:'/dashboard',selection:true})).json(),
+      {file:'src/Dashboard.vue',componentResolved:false});
     const prompt = {route:'/dashboard',prompt:'Update heading',file:'../outside.vue'};
     assert.equal((await call('chat',prompt)).status,403);
     const result = await (await call('chat',{...prompt,approved:true})).json();
-    assert.equal(result.file.text,'<template>After</template>');
-    assert.equal(result.previous,'<template>Before</template>');
-    assert.equal(await readFile(original,'utf8'),'<template>Before</template>');
+    assert.equal(result.file.text,dashboard.replace('Before','After'));
+    assert.equal(result.previous,dashboard);
+    assert.equal(await readFile(original,'utf8'),dashboard);
     assert.equal((await call('close')).status,200);
   } finally {
     await app.closeWorkspace();
     await new Promise(resolve=>app.close(resolve));
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+test('workspace inspection stays available during a Codex turn', async () => {
+  const root = await mkdtemp(join(tmpdir(),'open-studio-test-'));
+  const source = join(root,'source');
+  const started = Promise.withResolvers();
+  const finish = Promise.withResolvers();
+  const app = createStudio({store:join(root,'drafts'),runAgent:async () => {
+    started.resolve();
+    await finish.promise;
+    return {message:'Done',edits:[]};
+  }});
+  const file = 'src/App.vue';
+  let turn;
+  try {
+    await mkdir(join(source,'src'),{recursive:true});
+    await writeFile(join(source,'package.json'),JSON.stringify({scripts:{dev:'vite'},dependencies:{vue:'fixture'}}));
+    await writeFile(join(source,file),'<template>Before</template>');
+    await new Promise((resolve,reject)=>app.once('error',reject).listen(0,'127.0.0.1',resolve));
+    const origin = 'http://127.0.0.1:' + app.address().port;
+    const call = (action,data) => fetch(origin+'/api/vue',{method:'POST',
+      headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({action,...data})});
+    assert.equal((await call('import',{folder:source})).status,200);
+    const request = {route:'/',file,prompt:'Inspect this page',approved:true};
+    turn = call('agent-turn',request);
+    await Promise.race([started.promise,turn.then(response => assert.fail('Turn ended early: ' + response.status))]);
+    const read = await call('read',{file});
+    assert.equal(read.status,200);
+    const {text,hash} = await read.json();
+    assert.equal(text,'<template>Before</template>');
+    assert.equal((await call('git-diff')).status,200);
+    assert.equal((await call('review')).status,200);
+    assert.equal((await call('write',{file,hash,text:'<template>After</template>'})).status,409);
+    assert.equal((await call('agent-session',{sessionId:null})).status,409);
+    assert.equal((await call('agent-turn',request)).status,409);
+    assert.equal((await call('close')).status,409);
+    finish.resolve();
+    assert.equal((await turn).status,200);
+    assert.equal((await call('write',{file,hash,text:'<template>After</template>'})).status,200);
+  } finally {
+    finish.resolve();
+    await turn?.catch(() => {});
+    await app.closeWorkspace();
+    if (app.listening) await new Promise(resolve=>app.close(resolve));
     await rm(root,{recursive:true,force:true});
   }
 });
@@ -173,8 +234,9 @@ test('agent sessions isolate Codex history and restore the selected session on r
     const metadata = JSON.parse(await readFile(legacy.metadata,'utf8'));
     delete metadata.sessions;
     delete metadata.activeSessionId;
-    await writeFile(legacy.metadata,JSON.stringify({...metadata,threadId:'legacy-thread',
-      messages:[{author:'You',text:'Earlier message',route:'/'}]}));
+    const earlierMessages = [{author:'You',text:'Earlier\n  message',route:'/'},
+      ...Array.from({length:199},(_,index)=>({author:'Codex',text:`Earlier reply ${index + 1}`,route:'/'}))];
+    await writeFile(legacy.metadata,JSON.stringify({...metadata,threadId:'legacy-thread',messages:earlierMessages}));
 
     await new Promise((resolve,reject)=>app.once('error',reject).listen(0,'127.0.0.1',resolve));
     const origin = 'http://127.0.0.1:' + app.address().port;
@@ -187,6 +249,7 @@ test('agent sessions isolate Codex history and restore the selected session on r
       return body.workspace;
     };
     const first = await call('import',{folder:source});
+    assert.deepEqual(first.sessions,[{id:first.activeSessionId,title:'Earlier message',preview:'Earlier reply 199'}]);
     const second = await call('agent-session',{sessionId:null});
     assert.equal(second.sessions.length,2);
     assert.notEqual(second.activeSessionId,first.activeSessionId);
@@ -198,10 +261,17 @@ test('agent sessions isolate Codex history and restore the selected session on r
     const reopened = await call('import',{folder:source});
     assert.equal(reopened.activeSessionId,second.activeSessionId);
     assert.deepEqual(reopened.messages.map(message=>message.text),['New message','Reply']);
+    assert.deepEqual(reopened.sessions[1],{id:second.activeSessionId,title:'New message',preview:'Reply'});
     await call('agent-turn',{sessionId:second.activeSessionId,route:'/',prompt:'Continue',approved:true});
     const restored = await call('agent-session',{sessionId:first.activeSessionId});
-    assert.deepEqual(restored.messages.map(message=>message.text),['Earlier message']);
-    await call('agent-turn',{sessionId:first.activeSessionId,route:'/',prompt:'Resume',approved:true});
+    assert.deepEqual(restored.messages,earlierMessages);
+    const continued = await call('agent-turn',{sessionId:first.activeSessionId,route:'/',prompt:'Resume',approved:true});
+    assert.deepEqual(continued.sessions[0],{id:first.activeSessionId,title:'Earlier message',preview:'Reply'});
+    await call('close');
+    const reopenedLong = await call('import',{folder:source});
+    assert.equal(reopenedLong.activeSessionId,first.activeSessionId);
+    assert.deepEqual(reopenedLong.messages,[...earlierMessages,{author:'You',text:'Resume',route:'/'},
+      {author:'Codex',text:'Reply',route:'/'}]);
     assert.deepEqual(threads,[undefined,'new-thread','legacy-thread']);
   } finally {
     await app.closeWorkspace();
@@ -288,7 +358,7 @@ test('the preview sends the selected Vue owner and preserves clicks outside sele
     getAttribute() { return null; }
   }
   const element = Object.assign(new Element(),{
-    localName:'button',id:'save',textContent:'  Save  now  ',
+    localName:'button',id:'save',textContent:'  Save  now  ',outerHTML:'<button id="save">  Save  now  </button>',
     parentElement:{__vueParentComponent:{type:{__file:'/draft/src/Shared.vue'}}}
   });
   runInNewContext(routeBridge(origin),{
@@ -305,8 +375,30 @@ test('the preview sends the selected Vue owner and preserves clicks outside sele
   assert.equal(messages.at(-1).route,'/settings');
   assert.equal(messages.at(-1).component,'/draft/src/Shared.vue');
   assert.equal(messages.at(-1).element.label,'Save now');
+  assert.equal(messages.at(-1).markup,'<button id="save">  Save  now  </button>');
   handlers.get('click')(click);
   assert.equal(intercepted,1);
+});
+
+test('the preview reloads the current page only at the parent Studio’s request', async () => {
+  const {runInNewContext} = await import('node:vm');
+  const {routeBridge} = await import('../server/vue-page.mjs');
+  const origin = 'http://localhost:4320';
+  const parent = {postMessage() {}};
+  const handlers = new Map();
+  let reloads = 0;
+  runInNewContext(routeBridge(origin),{
+    parent,setInterval() {},
+    location:{hash:'#/settings',pathname:'/',reload() {reloads++;}},
+    window:{addEventListener(name,listener) {handlers.set(name,listener);}}
+  });
+  const receive = handlers.get('message');
+  const data = {type:'studio-vue-reload'};
+  receive({source:parent,origin:'http://localhost:4321',data});
+  receive({source:{},origin,data});
+  assert.equal(reloads,0);
+  receive({source:parent,origin,data});
+  assert.equal(reloads,1);
 });
 
 test('a running preview can review and publish agent edits through the Studio API', async () => {
@@ -315,7 +407,7 @@ test('a running preview can review and publish agent edits through the Studio AP
   const root = await mkdtemp(join(tmpdir(),'open-studio-test-'));
   const source = join(root,'project');
   const store = join(root,'drafts');
-  const app = createStudio({store,runAgent:async ({threadId,emit,model,reasoningEffort}) => {
+  const app = createStudio({store,runAgent:async ({threadId,emit,model,reasoningEffort,prompt}) => {
     assert.equal(model,'gpt-fixture');
     assert.equal(reasoningEffort,'high');
     if (!threadId) {
@@ -326,6 +418,10 @@ test('a running preview can review and publish agent edits through the Studio AP
     }
     assert.equal(threadId,'fixture-thread');
     emit({type:'thread.started',thread_id:'fixture-thread'});
+    if (prompt.endsWith('Try a stale edit')) return {message:'Prepared a proposal with a stale match',edits:[
+      {file:'src/App.vue',find:'Outdated text',replace:'After'},
+      {file:'src/page.css',find:null,replace:'button { color: blue; }'}
+    ]};
     return {message:'Updated the page and its style',edits:[
       {file:'src/App.vue',find:'Before',replace:'After'},
       {file:'src/page.css',find:null,replace:'button { color: blue; }'}
@@ -360,7 +456,8 @@ test('a running preview can review and publish agent edits through the Studio AP
     });
     assert.equal(workspace.state,'ready');
     assert.match(await (await fetch(workspace.url)).text(),/__open_studio_route__\.js/);
-    assert.deepEqual(await call('resolve',{route:'/',componentName:'App',selection:true}),{file,componentResolved:true});
+    assert.deepEqual(await call('resolve',{route:'/',componentName:'App',selection:true}),
+      {file,componentResolved:true,usage:{pages:1,files:0}});
     const formatted = await call('format-source',{file,text:'<template>\n<button>Before</button>\n</template>'});
     assert.match(formatted.text,/<template>\r?\n  <button>Before<\/button>\r?\n<\/template>/);
     assert.equal((await call('read',{file})).text,'<template>Before</template>');
@@ -368,6 +465,15 @@ test('a running preview can review and publish agent edits through the Studio AP
       model:'gpt-fixture',reasoningEffort:'high',editApproval:'all'});
     const question = (await call('status')).workspace.messages.at(-1).question;
     assert.deepEqual(question,{text:'Which density do you prefer?',options:['Compact','Spacious']});
+    await call('agent-turn',{route:'/',file,prompt:'Try a stale edit',approved:true,
+      model:'gpt-fixture',reasoningEffort:'high',editApproval:'shared'});
+    const stale = (await call('status')).workspace.pendingEdit;
+    assert.deepEqual(stale.files,['src/page.css']);
+    assert.deepEqual(stale.blockedFiles,[{file,reason:'The proposed edit does not match the current file.'}]);
+    assert.deepEqual((await call('review')).changes,[]);
+    const revised = await call('agent-approval',{id:stale.id,approved:false,revise:true});
+    assert.equal(revised.workspace.pendingEdit,null);
+    assert.match(revised.workspace.messages.at(-1).text,/chose to revise/);
     await call('agent-turn',{route:'/',file,prompt:question.options[0],approved:true,
       model:'gpt-fixture',reasoningEffort:'high',editApproval:'all'});
     const pending = (await call('status')).workspace.pendingEdit;

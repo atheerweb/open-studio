@@ -20,9 +20,6 @@ export class LiveWorkspace extends VueDraft {
     }
     const workspace = new LiveWorkspace(source,source);
     workspace.name = basename(source);
-    const manifest = await readFile(join(source,'package.json'),'utf8').then(JSON.parse).catch(() => null);
-    workspace.canPreview = Boolean((manifest?.dependencies?.vue || manifest?.devDependencies?.vue) &&
-      typeof manifest.scripts?.dev === 'string' && /\bvite\b/.test(manifest.scripts.dev));
     if (store) {
       const project = join(store,'live-' + fingerprint(process.platform === 'win32' ? source.toLowerCase() : source));
       await mkdir(project,{recursive:true});
@@ -42,6 +39,13 @@ export class LiveWorkspace extends VueDraft {
     return workspace;
   }
 
+  async refreshFiles() {
+    await super.refreshFiles();
+    const manifest = await readFile(join(this.directory,'package.json'),'utf8').then(JSON.parse).catch(() => null);
+    this.canPreview = Boolean((manifest?.dependencies?.vue || manifest?.devDependencies?.vue) &&
+      typeof manifest.scripts?.dev === 'string' && /\bvite\b/.test(manifest.scripts.dev));
+  }
+
   async installBridge(origin) {
     this.studioOrigin = origin;
   }
@@ -50,7 +54,14 @@ export class LiveWorkspace extends VueDraft {
     if (!this.canPreview) throw new Error('Preview requires a Vue project with a Vite npm run dev script.');
     let vite;
     try {
-      vite = pathToFileURL(createRequire(join(this.directory,'package.json')).resolve('vite')).href;
+      const require = createRequire(join(this.directory,'package.json'));
+      const manifestPath = require.resolve('vite/package.json');
+      const manifest = JSON.parse(await readFile(manifestPath,'utf8'));
+      const rootExport = manifest.exports?.['.'] ?? manifest.exports;
+      // Older Vite versions expose a separate CommonJS compatibility API.
+      const esmExport = typeof rootExport === 'string' ? rootExport : rootExport?.import ?? rootExport?.default;
+      const entry = typeof esmExport === 'string' ? esmExport : esmExport?.default ?? manifest.main;
+      vite = pathToFileURL(join(dirname(manifestPath),entry)).href;
     } catch {
       throw new Error('Install the project dependencies before starting the preview.');
     }

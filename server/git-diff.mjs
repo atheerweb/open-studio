@@ -4,6 +4,18 @@ import { promisify } from 'node:util';
 import { safeFile } from './draft-publish.mjs';
 
 const exec = promisify(execFile);
+const diffOptions = ['diff','--no-color','--no-ext-diff','--no-textconv','--relative','--ignore-submodules=dirty'];
+
+async function runGitDiff(cwd,...args) {
+  const env = {...process.env,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',LC_ALL:'C'};
+  return (await exec('git',['--literal-pathspecs','-c','core.fsmonitor=false',...args],{
+    cwd,env,windowsHide:true,timeout:10000,maxBuffer:4 * 1024 * 1024
+  })).stdout;
+}
+
+export function readStagedPatch(cwd) {
+  return runGitDiff(cwd,...diffOptions,'--cached','--patch','--unified=2','--','.');
+}
 
 function changedFiles(output) {
   const fields = output.split('\0');
@@ -19,10 +31,7 @@ function changedFiles(output) {
 }
 
 export async function readGitDiff(cwd,selection) {
-  const env = {...process.env,GIT_OPTIONAL_LOCKS:'0',GIT_NO_LAZY_FETCH:'1',LC_ALL:'C'};
-  const run = async (...args) => (await exec('git',['--literal-pathspecs','-c','core.fsmonitor=false',...args],{
-    cwd,env,windowsHide:true,timeout:10000,maxBuffer:4 * 1024 * 1024
-  })).stdout;
+  const run = (...args) => runGitDiff(cwd,...args);
 
   try {
     if ((await run('rev-parse','--is-inside-work-tree')).trim() !== 'true') return {available:false};
@@ -40,7 +49,6 @@ export async function readGitDiff(cwd,selection) {
     });
   const overrides = [...new Set(filters.split('\0').filter(Boolean))].flatMap(key =>
     ['-c',key + (key.endsWith('.required') ? '=false' : '=')]);
-  const diff = ['diff','--no-color','--no-ext-diff','--no-textconv','--relative','--ignore-submodules=dirty'];
   const listUntracked = async (path = '.') =>
     (await run('ls-files','--others','--exclude-standard','-z','--',path)).split('\0').filter(Boolean);
   if (selection) {
@@ -54,11 +62,11 @@ export async function readGitDiff(cwd,selection) {
       return {text:contents.toString('utf8')};
     }
     const index = group === 'staged' ? ['--cached'] : [];
-    return {patch:await run(...overrides,...diff,...index,'--patch','--',...(previousPath ? [previousPath,path] : [path]))};
+    return {patch:await run(...overrides,...diffOptions,...index,'--patch','--',...(previousPath ? [previousPath,path] : [path]))};
   }
   const [staged,unstaged,untracked] = await Promise.all([
-    run(...overrides,...diff,'--cached','--name-status','-z','--','.'),
-    run(...overrides,...diff,'--name-status','-z','--','.'),
+    run(...overrides,...diffOptions,'--cached','--name-status','-z','--','.'),
+    run(...overrides,...diffOptions,'--name-status','-z','--','.'),
     listUntracked()
   ]);
   return {available:true,staged:changedFiles(staged),unstaged:changedFiles(unstaged),untracked};

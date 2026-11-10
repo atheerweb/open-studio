@@ -20,8 +20,14 @@ const schema = {
   properties:{message:{type:'string'},patch:{anyOf:[patch,{type:'null'}]}}
 };
 
-export function codexArgs(schemaPath, resultPath) {
-  return ['--ask-for-approval','never','exec','--sandbox','read-only','--skip-git-repo-check',
+export function codexArgs(schemaPath, resultPath, {disableTools = false} = {}) {
+  const tools = disableTools ? [
+    ...['shell_tool','unified_exec','code_mode_host','multi_agent','browser_use','browser_use_external',
+      'in_app_browser','computer_use','view_image','image_generation','apps','plugins','remote_plugin']
+      .flatMap(feature=>['--disable',feature]),
+    '-c','web_search=disabled'
+  ] : [];
+  return ['--ask-for-approval','never',...tools,'exec','--sandbox','read-only','--skip-git-repo-check',
     '--ephemeral','--ignore-user-config','--ignore-rules','--output-schema',schemaPath,
     '--output-last-message',resultPath,'-'];
 }
@@ -40,13 +46,13 @@ function runCodex(args, prompt, cwd) {
   });
 }
 
-export async function askCodex(system, input, execute = runCodex) {
+export async function askCodex(system, input, {execute = runCodex, disableTools = false} = {}) {
   const directory = await mkdtemp(join(await realpath(tmpdir()),'open-studio-codex-'));
   try {
     const schemaPath = join(directory,'schema.json');
     const resultPath = join(directory,'result.json');
     await writeFile(schemaPath,JSON.stringify(schema),{flag:'wx'});
-    await execute(codexArgs(schemaPath,resultPath),system + '\n\nInput JSON:\n' + JSON.stringify(input),directory);
+    await execute(codexArgs(schemaPath,resultPath,{disableTools}),system + '\n\nInput JSON:\n' + JSON.stringify(input),directory);
     try {
       return JSON.parse(await readFile(resultPath,'utf8'));
     } catch {
