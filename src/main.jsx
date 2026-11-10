@@ -969,7 +969,7 @@ function App() {
               port={port} onPortChange={setPort} busy={locked}/>}
           </div>
           <DatabasePanel api={api} hidden={tab !== 'Database'}/>
-          {workspace?.architecture && <ArchitecturePanel api={api} hidden={tab !== 'Architecture'}/>}
+          {workspace?.architecture && <ArchitecturePanel api={api} hidden={tab !== 'Architecture'} projectName={workspace.name}/>}
           {tab === 'Source' && <div className="source-box draft-source">
             {file ? <>
               <div className="source-head">

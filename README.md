@@ -28,6 +28,18 @@ Open **Source Control** or **Diff** to see staged, unstaged, and untracked files
 
 Use the branch picker at the top of **Source Control** to switch to a local branch or check out a fetched remote branch with tracking. **Pull** updates the current branch from its upstream when it can fast-forward. Save any unsaved editor changes before switching or pulling.
 
+If a push is rejected because the remote branch has new commits, open **More Git actions** and choose **Merge from Remote**. If Git reports conflicts, resolve and stage the files, then commit the merge. **Abort Merge** discards work done to resolve the merge. Push again once the merge is complete.
+
+**Local Commit Changes** shows file changes in local commits since the branch diverged from its last fetched upstream. Use the undo button on a file to create an unstaged reversal, then review, stage, and commit it. The original commits remain in the branch history.
+
+## Explore backend architecture
+
+Open a Laravel folder to generate its **Architecture** views from local source. Use **Modules** to explore dependencies, **Business Lifecycles** to expand approval paths and branches, and **System Design** to see the API and its integrations. Select a node or relationship to inspect its supporting code.
+
+Studio can read existing [Understand Anything](https://github.com/Egonex-AI/Understand-Anything#readme) graphs in `.ua/` or `.understand-anything/`. To generate them through Codex, install the `understand` and `understand-domain` skills and choose **Enable AI analysis**. Studio asks for consent before sending eligible source from the folder to Codex.
+
+Studio checks for changes after a successful pull or push. To report successful terminal actions even when they leave local refs unchanged, select **Connect PowerShell** and run the displayed command in each terminal session you want to connect.
+
 ## Browse a MySQL database
 
 Open **Database**, enter your MySQL connection details, and select **Connect**. Use the table filter to find a table and preview up to 50 rows. Select an editable cell, enter a value or choose **Set to NULL**, then select **Save cell**.
