@@ -25,11 +25,11 @@ export function matchPage(records, route) {
   return files.size === 1 ? files.values().next().value : null;
 }
 
-export function routeBridge(studioOrigin) {
-  return '(' + previewBridge.toString() + ')(' + JSON.stringify(studioOrigin) + ');';
+export function routeBridge(studioOrigin,framework = 'vue') {
+  return '(' + previewBridge.toString() + ')(' + JSON.stringify(studioOrigin) + ',' + JSON.stringify(framework) + ');';
 }
 
-function previewBridge(studioOrigin) {
+function previewBridge(studioOrigin,framework) {
   if (parent === window) return;
   let last;
   let picking = false;
@@ -76,20 +76,36 @@ function previewBridge(studioOrigin) {
     host.style.transition = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'opacity 120ms ease-out';
     host.style.opacity = '1';
   };
-  const describe = element => {
+  const vueSource = element => {
     let owner = element;
     while (owner && !owner.__vueParentComponent) owner = owner.parentElement;
     let component = owner?.__vueParentComponent;
     const name = component?.type?.__name || component?.type?.name || null;
     while (component && !component.type?.__file && !component.vnode?.type?.__file) component = component.parent;
+    return {component:component?.type?.__file || component?.vnode?.type?.__file || null,componentName:name};
+  };
+  const reactSource = element => {
+    let fiber;
+    for (let node = element; node && !fiber; node = node.parentElement) {
+      const key = Object.keys(node).find(key => key.startsWith('__reactFiber$'));
+      if (key) fiber = node[key];
+    }
+    const type = fiber?._debugOwner?.type;
+    // React 18 records a filename. React 19 records the JSX creation stack.
+    const stack = fiber?._debugStack?.stack || '';
+    const frame = /(?:https?:\/\/[^\s()]+)?\/src\/[^\s()?:]+\.[cm]?[jt]sx?(?=[?:])/i.exec(stack);
+    return {component:fiber?._debugSource?.fileName || frame?.[0] || null,
+      componentName:type?.displayName || type?.name || null};
+  };
+  const describe = element => {
     const path = [];
     for (let node = element; node?.localName && path.length < 5; node = node.parentElement) {
       const siblings = Array.from(node.parentElement?.children || []).filter(item => item.localName === node.localName);
       path.unshift(node.localName + (node.id ? '#' + node.id : siblings.length > 1 ? ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : ''));
       if (node.id) break;
     }
-    return {component:component?.type?.__file || component?.vnode?.type?.__file || null,
-      componentName:name,markup:element.outerHTML?.slice(0,4001),element:{tag:element.localName,id:(element.id || '').slice(0,120),
+    return {...(framework === 'react' ? reactSource(element) : vueSource(element)),
+      markup:element.outerHTML?.slice(0,4001),element:{tag:element.localName,id:(element.id || '').slice(0,120),
         path:path.join(' > ').slice(0,250),label:(element.getAttribute('aria-label') ||
         element.textContent || '').trim().replace(/\s+/g,' ').slice(0,160)}};
   };

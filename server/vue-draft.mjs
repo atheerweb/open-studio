@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, parse } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { routeFiles, routeBridge, matchPage } from './vue-page.mjs';
+import { frontendFramework, hasViteDevScript, packageManifest, scriptExtension } from './project-framework.mjs';
 import { atomicWrite, bridgeFile, bridgeTag, fingerprint, projectFolders as folders, recordBaseline,
   rootFile, reviewDraft, publishDraft, resolveDraftConflict, safeFile } from './draft-publish.mjs';
 
@@ -52,9 +53,9 @@ export class VueDraft {
     if (source === dirname(source)) throw new Error('Select a frontend folder, not a drive root.');
     const packagePath = join(source, 'package.json');
     if (!(await lstat(packagePath)).isFile()) throw new Error('The frontend needs a regular package.json.');
-    const manifest = JSON.parse(await readFile(packagePath, 'utf8'));
-    if (!(manifest.dependencies?.vue || manifest.devDependencies?.vue) || typeof manifest.scripts?.dev !== 'string' || !/\bvite\b/.test(manifest.scripts.dev)) {
-      throw new Error('This build supports Vue frontends with a Vite npm run dev script.');
+    const manifest = packageManifest(await readFile(packagePath, 'utf8'));
+    if (!frontendFramework(manifest) || !hasViteDevScript(manifest)) {
+      throw new Error('Draft preview supports Vue and React frontends with a Vite npm run dev script.');
     }
     if (store) await mkdir(store,{recursive:true});
     const project = store && join(await realpath(store),fingerprint(windows ? source.toLowerCase() : source));
@@ -100,6 +101,9 @@ export class VueDraft {
 
   async refreshFiles() {
     const {directory} = this;
+    this.manifest = packageManifest(await safeFile(directory,'package.json').then(path => readFile(path,'utf8')).catch(() => null));
+    this.framework = frontendFramework(this.manifest);
+    const react = this.framework === 'react';
     const entries = await readdir(join(directory, 'src'), {recursive:true, withFileTypes:true}).catch(error => {
       if (error.code !== 'ENOENT') throw error;
       return [];
@@ -108,7 +112,7 @@ export class VueDraft {
     this.baselines = new Map();
     this.routes = [];
     for (const file of entries) {
-      if (!file.isFile() || !file.name.endsWith('.vue')) continue;
+      if (!file.isFile() || !(react ? scriptExtension.test(file.name) : file.name.endsWith('.vue'))) continue;
       const path = join(file.parentPath, file.name);
       const key = path.slice(directory.length + 1).split(/[\\/]/).join('/');
       const info = await lstat(path);
@@ -118,6 +122,13 @@ export class VueDraft {
         return '';
       });
       this.baselines.set(key, previous.get(key) ?? sourceText);
+    }
+    if (react) {
+      const files = this.files;
+      const home = files.find(file => /^src\/app\.[cm]?[jt]sx?$/i.test(file)) ||
+        files.find(file => /^src\/(?:main|index)\.[cm]?[jt]sx?$/i.test(file));
+      if (home) this.routes.push({route:'/',file:home});
+      return;
     }
     for (const entry of entries) {
       if (!entry.isFile() || !/\.[cm]?[jt]s$/.test(entry.name)) continue;
@@ -199,7 +210,7 @@ export class VueDraft {
     const html = await readFile(entry, 'utf8');
     if (!/<\/head\s*>/i.test(html)) throw new Error('The preview index.html needs a closing head tag.');
     const script = await safeFile(this.directory,bridgeFile);
-    const bridge = routeBridge(origin);
+    const bridge = routeBridge(origin,this.framework);
     await mkdir(dirname(script), {recursive:true});
     if (this.bridgeOrigin && html.includes(bridgeTag)) {
       const current = await readFile(script,'utf8').catch(error => {
@@ -248,7 +259,7 @@ export class VueDraft {
   }
 
   async pathFor(file) {
-    if (!this.baselines.has(file)) throw new Error('Unknown Vue source file.');
+    if (!this.baselines.has(file)) throw new Error('Unknown frontend source file.');
     return safeFile(this.directory,file);
   }
 
@@ -258,7 +269,7 @@ export class VueDraft {
   }
 
   async write(file, expectedHash, text) {
-    if (typeof text !== 'string' || Buffer.byteLength(text) > 524288) throw new Error('Invalid Vue source text.');
+    if (typeof text !== 'string' || Buffer.byteLength(text) > 524288) throw new Error('Invalid frontend source text.');
     if (this.writePending) throw new Error('Another draft edit is in progress.');
     this.writePending = true;
     try {

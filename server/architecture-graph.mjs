@@ -1,3 +1,5 @@
+import { isNestProject, nestModules } from './nest-architecture.mjs';
+
 const human = value => value.replace(/([a-z0-9])([A-Z])/g,'$1 $2').replaceAll('_',' ')
   .replace(/\b\w/g,char=>char.toUpperCase());
 const label = value => typeof value === 'string' ? value.slice(0,240) : '';
@@ -5,7 +7,6 @@ const moduleName = path => path.match(/^Modules\/([^/]+)\//i)?.[1] || (/^app\//i
 const position = (path,text,index) => ({path,line:text.slice(0,index).split('\n').length});
 const alternate = name => /reject|return|cancel|withdraw|declin|amend|fail/i.test(name);
 const permission = text => text.match(/->can\(['"]([\w-]+)['"]\)/)?.[1];
-
 function upstreamGraph(input,files) {
   const nodes = new Map();
   if (!Array.isArray(input?.nodes) || !Array.isArray(input?.edges)) return {nodes,edges:[]};
@@ -99,7 +100,7 @@ function traceLifecycle(group,files,name,states,multiple) {
     nodes:[...states.values()].filter(state=>used.has(state.id)),edges:transitions};
 }
 
-function systemGraph(files,laravel,knowledge) {
+function systemGraph(files,laravel,nest,knowledge) {
   const nodes = [];
   const edges = [];
   const add = (id,name,kind,source,relation,inferred = false) => {
@@ -107,7 +108,7 @@ function systemGraph(files,laravel,knowledge) {
     nodes.push({id,label:name,type:kind,source});
     if (relation) edges.push({from:'backend',to:id,label:relation,source,inferred});
   };
-  if (!laravel && !knowledge.nodes.size) return {nodes,edges};
+  if (!laravel && !nest && !knowledge.nodes.size) return {nodes,edges};
   const found = (pattern,pathPattern) => {
     for (const [path,text] of files) {
       if (!pathPattern.test(path)) continue;
@@ -115,7 +116,8 @@ function systemGraph(files,laravel,knowledge) {
       if (match) return position(path,text,match.index);
     }
   };
-  add('backend',laravel ? 'Laravel API' : 'Backend','API',laravel ? {path:'composer.json',line:1} : undefined);
+  const manifest = laravel ? 'composer.json' : nest ? 'package.json' : null;
+  add('backend',laravel ? 'Laravel API' : nest ? 'NestJS API' : 'Backend','API',manifest ? {path:manifest,line:1} : undefined);
   add('client','Client','Boundary');
   edges.push({from:'client',to:'backend',label:'Requests',inferred:true});
   if (laravel) {
@@ -142,6 +144,7 @@ export function analyzeArchitecture(files,artifacts = {}) {
   const knowledge = upstreamGraph(artifacts.knowledge,files);
   const domain = upstreamGraph(artifacts.domain,files);
   const laravel = files.get('composer.json')?.includes('"laravel/framework"') || false;
+  const nest = !laravel && isNestProject(files.get('package.json'));
   const modules = new Map();
   const related = new Map();
   const sourceGroups = new Map();
@@ -176,12 +179,32 @@ export function analyzeArchitecture(files,artifacts = {}) {
       }
     }
   }
+  const nestSources = new Map();
+  if (nest) {
+    const discovered = nestModules(files);
+    for (const module of discovered) {
+      addModule(module.id,module.source);
+      Object.assign(modules.get(module.id),{label:human(module.name),members:module.members});
+      for (const source of [module.source,...module.members.map(member => member.source)]) {
+        if (!nestSources.has(source.path)) nestSources.set(source.path,new Set());
+        nestSources.get(source.path).add(module.id);
+      }
+    }
+    for (const module of discovered) {
+      for (const {to,source} of module.imports) connect(module.id,to,'imports',source);
+    }
+  }
   const upstreamGroups = new Map();
   for (const layer of Array.isArray(artifacts.knowledge?.layers) ? artifacts.knowledge.layers.slice(0,200) : []) {
     if (!label(layer?.name) || !Array.isArray(layer.nodeIds)) continue;
     for (const id of layer.nodeIds.slice(0,50000)) upstreamGroups.set(id,label(layer.name));
   }
   for (const node of knowledge.nodes.values()) {
+    const owners = node.source && nestSources.get(node.source.path);
+    if (owners?.size === 1) {
+      upstreamGroups.set(node.id,owners.values().next().value);
+      continue;
+    }
     const local = node.source && moduleName(node.source.path);
     const name = local || (laravel ? null : upstreamGroups.get(node.id) || (node.type === 'module' ? node.label : null));
     if (name) upstreamGroups.set(node.id,addModule(name,node.source,node.description));
@@ -198,6 +221,8 @@ export function analyzeArchitecture(files,artifacts = {}) {
   const lifecycles = [...sourceGroups].flatMap(([group,sources])=>moduleLifecycles(group,sources));
   lifecycles.sort((a,b)=>a.label.localeCompare(b.label));
   lifecycles.push(...upstreamLifecycles(domain));
-  return {analyzer:laravel ? (knowledge.nodes.size || domain.nodes.size ? 'Laravel source + Understand Anything' : 'Laravel source') : 'Understand Anything',
-    modules:{nodes:[...modules.values()],edges:[...related.values()]},lifecycles,system:systemGraph(files,laravel,knowledge)};
+  const analyzer = [laravel ? 'Laravel source' : nest ? 'NestJS source' : null,
+    (!laravel && !nest) || knowledge.nodes.size || domain.nodes.size ? 'Understand Anything' : null].filter(Boolean).join(' + ');
+  return {analyzer,modules:{nodes:[...modules.values()],edges:[...related.values()]},lifecycles,
+    system:systemGraph(files,laravel,nest,knowledge)};
 }

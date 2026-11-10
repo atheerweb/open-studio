@@ -427,8 +427,17 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 .scm-spinner { animation: activity-spin 1.2s linear infinite; }
 .scm-branch { display: flex; gap: 6px; align-items: center; min-width: 0; padding-block: 2px 4px; }
 .scm-branch > svg { color: var(--accent); }
-.scm-branch .studio-select { flex: 1; min-height: 32px; padding: 4px 7px; }
-.scm-branch .scm-pull { gap: 4px; min-height: 32px; padding: 4px 7px; }
+.scm-branch .studio-select { flex: 1; }
+.scm-branch .scm-pull { gap: 4px; min-height: 44px; padding: 4px 7px; }
+.scm-pull .scm-count { margin-inline-start: 2px; color: var(--accent); background: var(--accent-light); }
+.scm-graph { border-top: 1px solid var(--border); }
+.scm-graph-history { overflow-x: auto; padding: 0 8px 6px; font-family: var(--font-code); font-size: 12px; }
+.scm-graph-row { display: grid; grid-template-columns: var(--scm-graph-width) minmax(100px,1fr); gap: 8px; line-height: 20px; }
+.scm-graph-lanes { color: var(--accent); white-space: pre; }
+.scm-graph-commit { display: flex; gap: 6px; min-width: 0; font-family: var(--font-ui,inherit); white-space: nowrap; }
+.scm-graph-commit code { color: var(--muted); }
+.scm-graph-commit span, .scm-graph-commit small { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.scm-graph-commit small { color: var(--accent); max-width: 35%; }
 .scm-actions { display: flex; position: relative; }
 .scm-actions .scm-commit { flex: 1; min-height: 30px; padding: 4px 7px; border-start-end-radius: 0; border-end-end-radius: 0; }
 .scm-actions .scm-more { width: 32px; min-height: 30px; padding: 0; border-start-start-radius: 0; border-end-start-radius: 0; }
@@ -484,6 +493,39 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
 .source-editor .cm-editor { height: 100%; }
 .source-editor .cm-scroller { font: 13px/1.65 var(--font-code); }
 .source-editor .cm-content { padding-block: 12px; }
+.source-editor-fallback:not([hidden]) { display: flex; flex-direction: column; }
+.source-editor-fallback p { padding: 8px 12px; color: var(--muted); }
+.source-editor-fallback textarea {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: 13px/1.65 var(--font-code);
+  resize: none;
+}
+.markdown-toggle { flex: none; }
+.markdown-toggle[aria-pressed=true] { color: var(--accent); background: var(--accent-light); }
+.markdown-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 16px clamp(16px, 4vw, 40px);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.markdown-preview > :first-child { margin-top: 0; }
+.markdown-preview a[href] { color: var(--accent); text-decoration: underline; }
+.markdown-preview :is(pre,code) { background: var(--paper); border-radius: var(--radius); font-family: var(--font-code); }
+.markdown-preview code { padding: 2px 4px; }
+.markdown-preview pre { overflow: auto; padding: 12px; }
+.markdown-preview pre code { padding: 0; }
+.markdown-preview blockquote { margin-inline: 0; padding-inline-start: 12px; border-inline-start: 3px solid var(--border-strong); color: var(--muted); }
+.markdown-preview table { border-collapse: collapse; }
+.markdown-preview :is(th,td) { border: 1px solid var(--border); padding: 4px 10px; }
+.markdown-preview img { max-width: 100%; height: auto; }
 .draft-source { background: var(--editor-bg); }
 .draft-source :is(.source-head,.source-actions) { background: var(--paper); }
 .source-head .source-path {
@@ -723,6 +765,7 @@ dialog{width:min(440px,calc(100% - 30px));border:1px solid var(--border);border-
   }
   .studio-select option:checked { color: var(--accent); }
   .studio-select option:is(:hover, :focus-visible, :checked) { background: var(--accent-light); }
+  .studio-select option .scm-branch-date { margin-inline-start: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
 }
 .agent-settings-approvals, .agent-model-status, .agent-model-retry { grid-column: 1 / -1; }
 .agent-model-status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }

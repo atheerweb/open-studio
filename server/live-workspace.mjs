@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { fingerprint } from './draft-publish.mjs';
 import { VueDraft } from './vue-draft.mjs';
 import { routeBridge } from './vue-page.mjs';
+import { hasViteDevScript } from './project-framework.mjs';
 
 export async function resolveLocalProjectFolder(folder) {
   if (typeof folder !== 'string' || !isAbsolute(folder) || folder.startsWith('\\\\')) {
@@ -46,9 +47,7 @@ export class LiveWorkspace extends VueDraft {
 
   async refreshFiles() {
     await super.refreshFiles();
-    const manifest = await readFile(join(this.directory,'package.json'),'utf8').then(JSON.parse).catch(() => null);
-    this.canPreview = Boolean((manifest?.dependencies?.vue || manifest?.devDependencies?.vue) &&
-      typeof manifest.scripts?.dev === 'string' && /\bvite\b/.test(manifest.scripts.dev));
+    this.canPreview = Boolean(this.framework && hasViteDevScript(this.manifest));
   }
 
   async installBridge(origin) {
@@ -56,7 +55,7 @@ export class LiveWorkspace extends VueDraft {
   }
 
   async prepareDependencies() {
-    if (!this.canPreview) throw new Error('Preview requires a Vue project with a Vite npm run dev script.');
+    if (!this.canPreview) throw new Error('Preview requires a Vue or React project with a Vite npm run dev script.');
     let vite;
     try {
       const require = createRequire(join(this.directory,'package.json'));
@@ -80,7 +79,7 @@ export default async function (env) {
   return mergeConfig(original?.config || {}, {plugins:[{
     name:'open-studio-preview',
     transformIndexHtml() {
-      return [{tag:'script',children:${JSON.stringify(routeBridge(this.studioOrigin))},injectTo:'head'}];
+      return [{tag:'script',children:${JSON.stringify(routeBridge(this.studioOrigin,this.framework))},injectTo:'head'}];
     }
   }]});
 }

@@ -1,18 +1,18 @@
 # Open Studio
 
-Open Studio is a local development workspace for editing Vue projects with Codex. Open a local folder or Git repository, edit the original files, and use Source Control to review, commit, and push changes.
+Open Studio is a local development workspace for editing Vue and React projects with Codex and exploring Laravel and NestJS backends. Open a local folder or Git repository, edit the original files, and use Source Control to review, commit, and push changes.
 
 ## Windows desktop app
 
 Run the Windows x64 setup executable, then launch **Open Studio** from the Start menu. The desktop app bundles its own runtime and starts the local Studio server automatically.
 
-Vue previews use Node.js and npm on your PATH and the project's installed dependencies. Source Control uses Git, and the Page agent uses the Codex CLI signed in with `codex login`.
+Vue and React previews use Node.js and npm on your PATH and the project's installed dependencies. Source Control uses Git, and the Page agent uses the Codex CLI signed in with `codex login`.
 
 From a Windows checkout with Node.js 24+ and npm, use `npm ci` followed by `npm run desktop` to launch Electron locally, or `npm run package:win` to build the installer in `release/`.
 
 ## Run in a browser
 
-Requirements: Node.js 24+, npm, Git for Source Control, and the Codex CLI signed in with `codex login`. Start any backend service your Vue app normally uses before opening its preview.
+Requirements: Node.js 24+, npm, Git for Source Control, and the Codex CLI signed in with `codex login`. Start any backend service your frontend normally uses before opening its preview.
 
 ~~~sh
 npm ci
@@ -20,9 +20,9 @@ npm run build
 npm start
 ~~~
 
-Open <http://localhost:4320> and select **Open Folder**. The folder chooser opens on the desktop running Open Studio and requires Zenity on Linux. For a trusted Vue/Vite project with installed dependencies, select **Start preview** to run its npm dev command in the original folder.
+Open <http://localhost:4320> and select **Open Folder**. The folder chooser opens on the desktop running Open Studio and requires Zenity on Linux. For a trusted Vue or React project with installed dependencies and a Vite `npm run dev` script, select **Start preview** to run the command in the original folder.
 
-Use **Select element** in the preview toolbar, then click an element. Studio uses Vue's development metadata to find the owning component when available. Use Explorer to select a Vue file manually. In **Page agent**, approve sharing project context and messages with Codex. The agent can prepare changes across several files. For shared-component edits, Studio lists the routes it can trace and waits for approval. Source saves and applied Codex edits update the original files directly.
+Use **Select element** in the preview toolbar, then click an element. Studio uses Vue or React development metadata to find the owning source when available. Use Explorer to select the source file manually. In **Page agent**, approve sharing project context and messages with Codex. The agent can prepare changes across several files. For shared-component edits, Studio lists the routes it can trace and waits for approval. Source saves and applied Codex edits update the original files directly.
 
 Open **Source Control** or **Diff** to see staged, unstaged, and untracked files across the repository. Select a file to review its diff. Use **+** to stage or **−** to unstage, enter a message, and choose **Commit** or **Commit & Push**. Use **Push** to send existing commits. Studio uses your Git credentials and the current branch's upstream. For a branch without an upstream, Studio uses `origin` or the sole configured remote and sets the upstream on success.
 
@@ -35,6 +35,8 @@ If a push is rejected because the remote branch has new commits, choose **Merge 
 ## Explore backend architecture
 
 Open a Laravel folder to generate its **Architecture** views from local source. Use **Modules** to explore dependencies, **Business Lifecycles** to expand approval paths and branches, and **System Design** to see the API and its integrations. Select a node or relationship to inspect its supporting code.
+
+Open a NestJS folder directly or choose **Link Backend** from a frontend workspace. Studio maps `@Module` declarations, statically resolvable imports, and registered controllers and providers to their source. Saved Understand Anything domain graphs can supply business lifecycles.
 
 Studio can read existing [Understand Anything](https://github.com/Egonex-AI/Understand-Anything#readme) graphs in `.ua/` or `.understand-anything/`. To generate them through Codex, install the `understand` and `understand-domain` skills and choose **Enable AI analysis**. Studio asks for consent before sending eligible source from the folder to Codex.
 
@@ -61,8 +63,8 @@ For React development with Fast Refresh, run `npm run dev` and open
 address, so there is no second server to start.
 
 - React and Vite build the interface. The Node server serves it on loopback.
-- The frontend runs from the open folder. Use projects whose dev scripts you trust. The frontend can use its own backend, including an already running Laravel API.
-- The Codex CLI resumes a session in the open folder using read-only tools. Studio validates its proposed text edits before applying them. Route impact is inferred from statically recognized router definitions and Vue imports.
+- The frontend runs from the open folder. Use projects whose dev scripts you trust. The frontend can use its own running backend.
+- The Codex CLI resumes a session in the open folder using read-only tools. Studio validates its proposed text edits before applying them. Studio traces supported Vue router definitions and local component imports. React route impact starts from the app's home entry and follows static imports.
 - Studio stores chat state under `~/.open-studio/drafts` by default. Use `OPEN_STUDIO_DRAFTS_DIR` to choose another location. SSO providers that block embedding may need a separate browser tab.
 - GitHub distributes the source. The working app needs the local Node server and Codex CLI.
 

@@ -33,7 +33,7 @@ const studioTheme = vscodeDarkInit({settings:{
   {tag:tags.invalid,color:'var(--error)'}
 ]});
 
-export default function SourceEditor({file,value,onChange,disabled}) {
+export default function SourceEditor({file,value,onChange,disabled,hidden}) {
   const host = useRef(null);
   const editor = useRef(null);
   const mode = useRef(new Compartment());
@@ -77,5 +77,5 @@ export default function SourceEditor({file,value,onChange,disabled}) {
     editor.current?.dispatch({effects:mode.current.reconfigure(editMode(disabled))});
   },[disabled]);
 
-  return <div ref={host} className="source-editor"/>;
+  return <div ref={host} className="source-editor" hidden={hidden}/>;
 }

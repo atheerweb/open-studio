@@ -12,6 +12,30 @@ import {SkillPrompt} from './skill-prompt.jsx';
 import {Select} from './select.jsx';
 
 const SourceEditor = lazy(() => import('./source-editor.jsx'));
+const MarkdownPreview = lazy(() => import('./markdown-preview.mjs'));
+
+class SourceViewBoundary extends React.Component {
+  state = {failed:false};
+
+  static getDerivedStateFromError() {
+    return {failed:true};
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+function PlainSourceEditor({file,value,onChange,readOnly,hidden}) {
+  return <div className="source-editor source-editor-fallback" hidden={hidden}>
+    <p role="status">The code editor could not load. Showing plain text.</p>
+    <textarea aria-label="Source editor" value={value} readOnly={readOnly} spellCheck={false} wrap="off"
+      onChange={event=>{
+        const text = event.target.value;
+        onChange(file.text.includes('\r\n') ? text.replaceAll('\n','\r\n') : text);
+      }}/>
+  </div>;
+}
 
 const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked'],['committed','Local Commit Changes']];
 const gitStatusNames = {A:'Added',M:'Modified',D:'Deleted',R:'Renamed',C:'Copied',T:'Type changed',U:'Conflict','?':'Untracked'};
@@ -23,6 +47,25 @@ function gitFiles(result,group) {
 }
 
 const generatingCommitMessage = 'Generating commit message…';
+const branchDate = new Intl.DateTimeFormat(undefined,{dateStyle:'medium'});
+
+function GitGraph({rows}) {
+  const width = Math.max(1,...rows.map(row=>row.lanes.length));
+  return <details className="scm-graph">
+    <summary><ChevronRight size={14} aria-hidden="true"/><span>Git Graph</span></summary>
+    {rows.length ? <div className="scm-graph-history" style={{'--scm-graph-width':width + 'ch'}} role="group" aria-label="Recent commits">
+      {rows.map(({lanes,hash,shortHash,refs,subject},index)=>
+        <div className="scm-graph-row" key={hash || index}>
+          <span className="scm-graph-lanes" aria-hidden="true">{lanes}</span>
+          {hash && <div className="scm-graph-commit" title={[hash,subject,refs].filter(Boolean).join('\n')}>
+            <code>{shortHash}</code>
+            <span>{subject || '(no commit message)'}</span>
+            {refs && <small>{refs}</small>}
+          </div>}
+        </div>)}
+    </div> : <p className="scm-empty">No commits yet.</p>}
+  </details>;
+}
 
 function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,message,setMessage,messageError,pushRejection,busy,locked,live,worktreeBlock}) {
   const [actionsOpen,setActionsOpen] = useState(false);
@@ -37,6 +80,9 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
   const localBranches = result?.branches?.local || [];
   const remoteBranches = result?.branches?.remote || [];
   const currentRef = localBranches.includes(result?.branch) ? 'refs/heads/' + result.branch : '';
+  const branchLabel = result?.branch || 'Detached HEAD';
+  const incomingCommits = result?.incomingCommits;
+  const pullLabel = incomingCommits > 0 ? 'Pull ' + incomingCommits + ' incoming commit' + (incomingCommits === 1 ? '' : 's') : 'Pull';
   const worktreeLocked = locked || Boolean(worktreeBlock);
   const canRecoverPush = result?.canMerge && !result.mergeInProgress && pushRejection?.branch === result.branch;
   const trackedChanges = staged.length > 0 || changes.some(file=>file.group === 'unstaged');
@@ -49,7 +95,8 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
     : 'The sparkle sends your staged diff to Codex.';
   return <>
     <div className="panel-label"><span>SOURCE CONTROL</span>
-      <button className="icon" aria-label="Refresh Git changes" title="Refresh Git changes" onClick={onRefresh} disabled={!!busy}><RefreshCw size={15}/></button>
+      <button className="icon" aria-label="Refresh Git changes" title={live ? 'Refresh Git changes and fetch remote branches' : 'Refresh Git changes'}
+        onClick={onRefresh} disabled={locked}><RefreshCw size={15} aria-hidden="true"/></button>
     </div>
     {result?.available && live && <form className="scm-controls" onSubmit={event=>{
       event.preventDefault();
@@ -57,20 +104,25 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
     }}>
       <div className="scm-branch">
         <GitBranch size={15} aria-hidden="true"/>
-        <Select aria-label="Switch Git branch" value={currentRef} title={result.branch || 'Detached HEAD'}
+        <Select aria-label="Switch Git branch" value={currentRef} title={branchLabel} selectedLabel={branchLabel}
           disabled={worktreeLocked || result.mergeInProgress || localBranches.length + remoteBranches.length === 0}
           onChange={event=>onAction('git-switch',{ref:event.target.value})}>
-          {!currentRef && <option value="" disabled>{result.branch || 'Detached HEAD'}</option>}
-          {localBranches.length > 0 && <optgroup label="Local branches">
-            {localBranches.map(branch=><option key={branch} value={'refs/heads/' + branch}>{branch}</option>)}
-          </optgroup>}
-          {remoteBranches.length > 0 && <optgroup label="Remote branches">
-            {remoteBranches.map(branch=><option key={branch} value={'refs/remotes/' + branch}>{branch}</option>)}
-          </optgroup>}
+          {!currentRef && <option value="" disabled>{branchLabel}</option>}
+          {localBranches.map(branch=><option key={'local:' + branch} value={'refs/heads/' + branch}>{branch}</option>)}
+          {remoteBranches.map(branch=>{
+            const updatedAt = result.remoteBranchUpdatedAt?.[branch];
+            return <option key={'remote:' + branch} value={'refs/remotes/' + branch}>
+              {branch}{updatedAt && <> <time className="scm-branch-date" dateTime={updatedAt}
+                title={'Tip committed ' + new Date(updatedAt).toLocaleString()}>{branchDate.format(new Date(updatedAt))}</time></>}
+            </option>;
+          })}
         </Select>
         <span title={result.canPull ? 'Pull from ' + result.upstream : 'The current branch needs an upstream to pull.'}>
-          <button type="button" className="quiet scm-pull" disabled={worktreeLocked || result.mergeInProgress || !result.canPull}
-            onClick={()=>onAction('git-pull',{branch:result.branch})}><ArrowDown size={14} aria-hidden="true"/> Pull</button>
+          <button type="button" className="quiet scm-pull" aria-label={pullLabel}
+            disabled={worktreeLocked || result.mergeInProgress || !result.canPull} onClick={()=>onAction('git-pull',{branch:result.branch})}>
+            <ArrowDown size={14} aria-hidden="true"/> Pull
+            {incomingCommits > 0 && <span className="scm-count" aria-hidden="true">{incomingCommits}</span>}
+          </button>
         </span>
       </div>
       {worktreeBlock && <small>{worktreeBlock}</small>}
@@ -142,8 +194,9 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
     </form>}
     {!result ? <p className="scm-empty">{busy || 'Refresh to load Git changes.'}</p>
       : !result.available ? <p className="scm-empty">{result.reason || 'The open folder is outside a Git working tree.'}</p>
-      : !staged.length && !changes.length && !committed.length ? <p className="scm-empty">No Git changes.</p>
-      : <div className="scm-tree">{[['staged','Staged Changes',staged],['unstaged','Changes',changes],
+      : <div className="scm-tree">
+        {!staged.length && !changes.length && !committed.length && <p className="scm-empty">No Git changes.</p>}
+        {[['staged','Staged Changes',staged],['unstaged','Changes',changes],
         ['committed','Local Commit Changes',committed]].map(([kind,label,files])=>{
         if (!files.length) return null;
         const isStaged = kind === 'staged';
@@ -186,7 +239,9 @@ function GitChanges({result,selected,onSelect,onRefresh,onAction,onGenerate,mess
             <StageIcon size={15} aria-hidden="true"/>
           </button>}
         </div>;
-      })}</div>}
+      })}
+      {live && <GitGraph rows={result.graph || []}/>}
+      </div>}
   </>;
 }
 
@@ -371,8 +426,8 @@ function EmptyPreview({onImport, workspace, onStart, port, onPortChange, busy}) 
       <span className="preview-kicker"><i aria-hidden="true"/>LOCAL WORKBENCH</span>
       <h1>{workspace ? (canPreview ? 'Your project is ready to run' : workspace.name) : 'Open a project folder'}</h1>
       <p>{workspace ? (canPreview ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
-        : 'Open Source Control to review and commit changes. Live preview is available for Vue projects that use Vite.')
-        : 'Edit and preview your Vue project locally, then review, commit, and push with Source Control.'}</p>
+        : 'Open Source Control to review and commit changes. Vite preview supports Vue and React projects.')
+        : 'Edit and preview a Vue or React project locally, then review, commit, and push with Source Control.'}</p>
       {canPreview && <form className="preview-start" onSubmit={onStart}>
         <label htmlFor="preview-port">Preview port
           <input id="preview-port" type="number" min="1024" max="65535" required
@@ -457,6 +512,8 @@ function App() {
   const [manualRoute,setManualRoute] = useState(null);
   const [file,setFile] = useState(null);
   const [editor,setEditor] = useState('');
+  const [showMarkdownPreview,setShowMarkdownPreview] = useState(false);
+  const markdownFile = !!file && /\.(?:md|markdown)$/i.test(file.file);
   const [selection,setSelection] = useState(null);
   const [selectionInfo,setSelectionInfo] = useState(null);
   const [picking,setPicking] = useState(false);
@@ -661,6 +718,7 @@ function App() {
   },[pageFile]);
 
   function openFile(value) {
+    if (value?.file !== file?.file || value?.side !== file?.side) setShowMarkdownPreview(false);
     setFile(value);
     setEditor(value?.text || '');
   }
@@ -770,8 +828,8 @@ function App() {
     });
   }
   function chooseExplorerFile(name) {
-    const vueSource = explorerSide === 'frontend' && workspace.files.includes(name);
-    choose(name,{side:vueSource ? undefined : explorerSide});
+    const pageSource = explorerSide === 'frontend' && workspace.files.includes(name);
+    choose(name,{side:pageSource ? undefined : explorerSide});
   }
   function save(text) {
     perform('Saving source…',async () => {
@@ -879,8 +937,8 @@ function App() {
       setTab(name);
     });
   }
-  async function refreshGit() {
-    const result = await api('git-diff');
+  async function refreshGit(fetchRemotes = false) {
+    const result = await api(fetchRemotes ? 'git-fetch' : 'git-diff');
     setCommitMessageError('');
     const changes = gitGroups.flatMap(([group])=>gitFiles(result,group).map(change=>({...change,group})));
     const selection = changes.find(change=>change.group === gitFile?.group && change.path === gitFile.path)
@@ -892,6 +950,7 @@ function App() {
     setGitContent(null);
     setGitFile(selection);
     if (selection) setGitContent(await api('git-file',selection));
+    if (result.fetchError) setNotice({error:true,text:'Could not refresh all remote branches. ' + result.fetchError});
   }
   function generateCommitMessage() {
     return perform(generatingCommitMessage,async () => {
@@ -1035,7 +1094,7 @@ function App() {
       <aside id="workspace-sidebar" className="explorer" aria-label={sidebar === 'git' ? 'Source Control' : 'Project explorer'}
         inert={!explorerOpen} aria-hidden={!explorerOpen}>
         {sidebar === 'git' ? <GitChanges result={gitDiff} selected={gitFile} onSelect={openGitFile}
-          onRefresh={()=>perform('Refreshing Git changes…',refreshGit)} onAction={gitAction} onGenerate={generateCommitMessage}
+          onRefresh={()=>perform('Refreshing Git changes…',()=>refreshGit(workspace?.live))} onAction={gitAction} onGenerate={generateCommitMessage}
           message={commitMessage} setMessage={message=>{setCommitMessage(message);setCommitMessageError('');}}
           messageError={commitMessageError} pushRejection={pushRejection} busy={busy} locked={locked} live={workspace?.live}
           worktreeBlock={dirty ? 'Save your source changes before changing the working tree.'
@@ -1086,7 +1145,7 @@ function App() {
                   {picking ? 'Cancel selection' : selectedElement ? 'Pick again' : 'Select element'}
                 </button></div>
               <div className="preview-frame">
-                <iframe key={previewRevision} ref={preview} title="Vue project preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
+                <iframe key={previewRevision} ref={preview} title="Project preview" src={workspace.url} onLoad={previewLoaded} sandbox="allow-scripts allow-same-origin allow-forms"/>
                 <div className="picker-guide" id="picker-guide" aria-hidden={!picking}>
                   <MousePointer2 size={17} aria-hidden="true"/>
                   <span><strong>Pick an element</strong><small>Click or tap, or press Tab then Enter.</small></span>
@@ -1102,7 +1161,7 @@ function App() {
             : tab === 'Architecture' && <section className="empty-source architecture-empty" aria-label="Architecture">
               <Network size={28} aria-hidden="true"/>
               <h2>Link a backend to view its architecture</h2>
-              <p>Choose a Laravel project or a folder with a saved Understand Anything graph.</p>
+              <p>Choose a Laravel or NestJS project, or a folder with a saved Understand Anything graph.</p>
               <button type="button" className="primary" disabled={locked} onClick={()=>openFolderDialog('backend')}>Link Backend</button>
             </section>}
           {tab === 'Source' && <div className="source-box draft-source">
@@ -1113,11 +1172,25 @@ function App() {
                 <small className={dirty ? 'source-state dirty' : 'source-state'}>
                   {file.editable === false ? 'Read only' : dirty ? 'Unsaved' : 'Saved'}
                 </small>
+                {markdownFile && <button type="button" className="quiet markdown-toggle" aria-pressed={showMarkdownPreview}
+                  onClick={()=>setShowMarkdownPreview(show=>!show)}>Preview Markdown</button>}
               </div>
-              <Suspense fallback={<div className="source-editor" role="status">Loading editor…</div>}>
-                <SourceEditor key={(file.side || 'vue') + ':' + file.file} file={file.file} value={editor}
-                  onChange={setEditor} disabled={locked || file.editable === false}/>
-              </Suspense>
+              <SourceViewBoundary key={(file.side || 'page') + ':' + file.file} fallback={
+                <PlainSourceEditor file={file} value={editor} onChange={setEditor}
+                  readOnly={locked || file.editable === false} hidden={showMarkdownPreview}/>
+              }>
+                <Suspense fallback={<div className="source-editor" role="status" hidden={showMarkdownPreview}>Loading editor…</div>}>
+                  <SourceEditor file={file.file} value={editor} onChange={setEditor}
+                    disabled={locked || file.editable === false} hidden={showMarkdownPreview}/>
+                </Suspense>
+              </SourceViewBoundary>
+              {markdownFile && showMarkdownPreview && <SourceViewBoundary fallback={
+                <div className="markdown-preview" role="status">Markdown preview could not load. Switch to source to read the file.</div>
+              }>
+                <Suspense fallback={<div className="markdown-preview" role="status">Loading Markdown…</div>}>
+                  <MarkdownPreview source={editor}/>
+                </Suspense>
+              </SourceViewBoundary>}
               <div className="source-actions">
                 <button className="primary" disabled={!dirty || locked || file.editable === false ||
                   (file.side !== 'backend' && !!workspace?.pendingEdit)} onClick={()=>save(editor)}><Check size={16}/>Save file</button>
@@ -1215,15 +1288,15 @@ function App() {
             <Plus size={17} aria-hidden="true"/>
           </button>
         </div>)}
-        {!showHistory && <div className="page-context"><small>PAGE CONTEXT</small><span><Globe2 size={14}/>{route || 'Waiting for preview'}</span><p>{resolving ? 'Finding Vue source…' : target || (route ? 'Page context' : 'Open a page to connect its source.')}</p>
+        {!showHistory && <div className="page-context"><small>PAGE CONTEXT</small><span><Globe2 size={14}/>{route || 'Waiting for preview'}</span><p>{resolving ? 'Finding component source…' : target || (route ? 'Page context' : 'Open a page to connect its source.')}</p>
           {selectedElement && <div className="selection-context">
             <div><Check size={14} aria-hidden="true"/><code title={elementName}>{elementName}</code>
               <button type="button" className="icon" aria-label="Clear selected element" onClick={()=>setSelection(null)}><X size={15} aria-hidden="true"/></button></div>
             {selectedElement.label && <p dir="auto">{selectedElement.label}</p>}
             <p role="status">{resolving ? 'Looking up the component…' : usage
-              ? `${usage.pages} traced ${usage.pages === 1 ? 'page' : 'pages'} · ${usage.files} referencing Vue ${usage.files === 1 ? 'file' : 'files'}`
+              ? `${usage.pages} traced ${usage.pages === 1 ? 'page' : 'pages'} · ${usage.files} referencing ${usage.files === 1 ? 'file' : 'files'}`
               : selectedSource?.componentResolved ? 'Component usage unavailable' :
-                selectedSource?.file ? 'Element attached with page source' : 'Vue source unavailable for this element.'}</p>
+                selectedSource?.file ? 'Element attached with page source' : 'Component source unavailable for this element.'}</p>
             {selection.markup && <details className="selection-markup" key={selection.markup}>
               <summary>Rendered HTML</summary>
               <pre tabIndex={0} aria-label="Selected element HTML"><code>{selection.markup.length > 4000
@@ -1325,7 +1398,7 @@ function App() {
         <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close folder dialog" onClick={()=>setFolderMode(null)} disabled={!!busy}><X size={19}/></button></div>
         <h2 id="folder-dialog-title">{linkingBackend ? 'Link a backend folder' : savedWorkspaces?.length ? 'Workspaces' : 'Open a project folder'}</h2>
         <p>{linkingBackend ? 'Studio will use this folder for the Architecture tab in this workspace.'
-          : 'Laravel projects open in Architecture, and Vue projects can run a Vite preview.'}</p>
+          : 'Laravel and NestJS projects open in Architecture. Vue and React projects can run a Vite preview.'}</p>
         {!linkingBackend && !!savedWorkspaces?.length && <section className="saved-workspaces" aria-labelledby="saved-workspaces-title">
           <h3 id="saved-workspaces-title">Saved workspaces</h3>
           <ul>{savedWorkspaces.map(project=><li key={project.folder}>

@@ -6,9 +6,9 @@ import {tmpdir} from 'node:os';
 import {promisify} from 'node:util';
 import {analyzeArchitecture} from './architecture-graph.mjs';
 import {runArchitectureSkills} from './codex.mjs';
+import {isNestProject} from './nest-architecture.mjs';
 
 const exec = promisify(execFile);
-const version = 2;
 const maxSource = 384 * 1024;
 const maxArtifact = 32 * 1024 * 1024;
 const graphDirs = ['.understand-anything','.ua'];
@@ -140,9 +140,11 @@ async function enrichSnapshot(files,runSkills,signal) {
 }
 
 export async function openArchitecture(folder,store,{runSkills = runArchitectureSkills} = {}) {
-  const manifest = await readInside(folder,'composer.json',maxSource);
-  const isLaravel = Boolean(manifest?.includes('"laravel/framework"'));
-  if (!isLaravel && !await findArtifacts(folder)) return null;
+  const [composer,manifest] = await Promise.all(['composer.json','package.json'].map(file => readInside(folder,file,maxSource)));
+  const nest = isNestProject(manifest);
+  const hasLocalAnalyzer = Boolean(composer?.includes('"laravel/framework"') || nest);
+  if (!hasLocalAnalyzer && !await findArtifacts(folder)) return null;
+  const version = nest ? 3 : 2;
 
   const cacheRoot = store && join(store,'architecture');
   const cache = cacheRoot && join(cacheRoot,key(identity(folder)) + '.json');
@@ -191,7 +193,7 @@ export async function openArchitecture(folder,store,{runSkills = runArchitecture
       message = '';
       return;
     }
-    if (!isLaravel && !Object.keys(snapshot.artifacts).length) throw new Error('No valid Understand Anything graph is available.');
+    if (!hasLocalAnalyzer && !Object.keys(snapshot.artifacts).length) throw new Error('No valid Understand Anything graph is available.');
     const stillCurrent = async () => {
       const latest = await collectSnapshot(folder,await findArtifacts(folder));
       if (stopped) return false;
@@ -274,7 +276,7 @@ export async function openArchitecture(folder,store,{runSkills = runArchitecture
       refresh();
     },
     async enableAI(value) {
-      if (!setting || !isLaravel || !gitRoot) return;
+      if (!setting || !hasLocalAnalyzer || !gitRoot) return;
       await mkdir(cacheRoot,{recursive:true});
       await writeAtomically(setting,value ? 'enabled' : 'disabled');
       enabled = value;
@@ -292,7 +294,7 @@ export async function openArchitecture(folder,store,{runSkills = runArchitecture
     },
     status(includeGraph = true) {
       return {state:current ? (record ? 'updating' : 'generating') : message ? 'failed' : 'ready',
-        message,warning,terminal:!!events,canEnableAI:!!setting && isLaravel && !!gitRoot,aiEnabled:!!enabled,
+        message,warning,terminal:!!events,canEnableAI:!!setting && hasLocalAnalyzer && !!gitRoot,aiEnabled:!!enabled,
         generatedAt:record?.generatedAt,importedStale:record?.importedStale,
         ...(includeGraph && {graph:record?.graph})};
     },

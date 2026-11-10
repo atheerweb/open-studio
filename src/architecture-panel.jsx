@@ -1,4 +1,4 @@
-import React, {useEffect,useId,useRef,useState} from 'react';
+import React, {useEffect,useRef,useState} from 'react';
 import {
   ArrowDown, ArrowDownRight, ArrowRight, Box, Check, ChevronDown, ChevronRight, CircleAlert, Code2, Copy, Database,
   FileCode2, GitBranch, Layers, Network, RefreshCw, Search, Server, Settings2, Terminal, Workflow, X
@@ -64,89 +64,41 @@ function chooseEdge(edge,nodes,select,event) {
     description:displayRelation(edge.label)},event);
 }
 
-function RelationshipList({title,edges,nodes,select}) {
-  const incoming = title === 'Used by';
-  const Icon = incoming ? ArrowDownRight : ArrowRight;
-  return <section className="arch-relations" aria-label={title}>
+function RelationshipList({incoming = false,edges,nodes,onChoose,select}) {
+  const title = incoming ? 'Used by' : 'Uses';
+  return <section className="arch-relations" data-direction={incoming ? 'incoming' : 'outgoing'} aria-label={title}>
     <h4>{title}<span className="arch-count">{edges.length}</span></h4>
-    {edges.length ? edges.map(edge=>{
-      const neighbor = nodes.get(incoming ? edge.from : edge.to);
-      if (!neighbor) return null;
-      return <button type="button" className="arch-row" key={edgeKey(edge)} onClick={event=>chooseEdge(edge,nodes,select,event)}>
-        <Icon size={16} aria-hidden="true"/>
-        <span><strong>{neighbor.label}</strong><small>{displayRelation(edge.label)}{edge.inferred ? ' · Inferred' : ''}</small></span>
-        <ChevronRight size={14} aria-hidden="true"/>
-      </button>;
-    }) : <p>{incoming ? 'No incoming relationships found.' : 'No outgoing relationships found.'}</p>}
+    {edges.length ? <ul>{edges.map(edge=>{
+      const from = nodes.get(edge.from);
+      const to = nodes.get(edge.to);
+      const neighbor = incoming ? from : to;
+      const evidenceLabel = 'View source evidence for ' + from.label + ' → ' + to.label + ' (' + displayRelation(edge.label) + ')';
+      return <li key={edgeKey(edge)}>
+        <button type="button" className="arch-row" onClick={()=>onChoose(neighbor.id)}>
+          <Box size={15} aria-hidden="true"/>
+          <span><strong>{neighbor.label}</strong><small>{displayRelation(edge.label)}{edge.inferred ? ' · Inferred' : ''}</small></span>
+          <ChevronRight size={14} aria-hidden="true"/>
+        </button>
+        <button type="button" className="arch-icon" aria-label={evidenceLabel} title="View source evidence"
+          onClick={event=>chooseEdge(edge,nodes,select,event)}><Code2 size={16} aria-hidden="true"/></button>
+      </li>;
+    })}</ul> : <p>{incoming ? 'No incoming relationships found.' : 'No outgoing relationships found.'}</p>}
   </section>;
-}
-
-function MapCanvas({nodes,edges,focused,onChoose}) {
-  const id = useId();
-  const columns = nodes.length > 12 ? 4 : nodes.length > 4 ? 3 : 2;
-  const rows = Math.ceil(nodes.length / columns);
-  const width = 800;
-  const height = Math.max(164,rows * 58 + 26);
-  const stepX = width / columns;
-  const boxWidth = Math.min(172,stepX - 30);
-  const position = new Map(nodes.map((node,index)=>[
-    node.id,{x:(index % columns + .5) * stepX,y:42 + Math.floor(index / columns) * 58}
-  ]));
-  const links = edges.filter(edge=>position.has(edge.from) && position.has(edge.to));
-  const ordered = [...links.filter(edge=>edge.from !== focused && edge.to !== focused),
-    ...links.filter(edge=>edge.from === focused || edge.to === focused)];
-  return <svg className="arch-map-svg" viewBox={'0 0 ' + width + ' ' + height} role="group" aria-label="Interactive module map">
-    <defs>
-      <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-        <path d="M0 0 8 4 0 8" className="arch-map-arrow"/>
-      </marker>
-    </defs>
-    {ordered.map(edge=>{
-      const from = position.get(edge.from);
-      const to = position.get(edge.to);
-      const active = edge.from === focused || edge.to === focused;
-      const side = from.x === to.x ? 1 : Math.sign(to.x - from.x);
-      const start = from.x + side * boxWidth / 2;
-      const end = to.x - (from.x === to.x ? -1 : side) * boxWidth / 2;
-      const bend = from.x === to.x ? 16 : Math.min(66,Math.abs(end - start) / 2);
-      const d = 'M ' + start + ' ' + from.y + ' C ' + (start + side * bend) + ' ' + from.y + ' ' +
-        (end + (from.x === to.x ? 1 : -side) * bend) + ' ' + to.y + ' ' + end + ' ' + to.y;
-      return <path key={edgeKey(edge)} className="arch-map-link" data-active={active} data-inferred={!!edge.inferred} d={d}
-        markerEnd={active ? 'url(#' + id + ')' : undefined} aria-hidden="true"/>;
-    })}
-    {nodes.map(node=>{
-      const {x,y} = position.get(node.id);
-      const active = node.id === focused;
-      const limit = Math.floor((boxWidth - 34) / 7);
-      const split = node.label.length > limit ? node.label.lastIndexOf(' ',limit) : -1;
-      const first = split > 0 ? node.label.slice(0,split) : node.label;
-      const second = split > 0 ? node.label.slice(split + 1) : '';
-      const truncate = text=>text.length > limit ? text.slice(0,limit - 1) + '…' : text;
-      return <g key={node.id} role="button" tabIndex={0} aria-label={node.label} aria-pressed={active}
-        className="arch-map-node" data-active={active} transform={'translate(' + x + ' ' + y + ')'}
-        onClick={()=>onChoose(node.id)} onKeyDown={event=>{
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            onChoose(node.id);
-          }
-        }}>
-        <title>{node.label}</title>
-        <rect x={-boxWidth / 2} y="-19" width={boxWidth} height="38" rx="7"/>
-        <rect className="arch-map-glyph" x={-boxWidth / 2 + 11} y="-4" width="8" height="8" rx="2"/>
-        <text x={-boxWidth / 2 + 27} y={second ? -2 : 4}>{truncate(first)}</text>
-        {second && <text x={-boxWidth / 2 + 27} y="13">{truncate(second)}</text>}
-      </g>;
-    })}
-  </svg>;
 }
 
 function Modules({graph,active,onChoose,select}) {
   const [query,setQuery] = useState('');
   const directory = useRef(null);
   const selectedButton = useRef(null);
+  const mapSelection = useRef(null);
+  const choosingFromMap = useRef(false);
   const nodes = new Map(graph.nodes.map(node=>[node.id,node]));
   const module = nodes.get(active) || graph.nodes.find(node=>node.id === 'Lawsuit') || graph.nodes[0];
   useEffect(()=>{
+    if (choosingFromMap.current) {
+      mapSelection.current?.focus();
+      choosingFromMap.current = false;
+    }
     const list = directory.current;
     const button = selectedButton.current;
     if (!list || !button) return;
@@ -156,11 +108,14 @@ function Modules({graph,active,onChoose,select}) {
     else if (target.bottom > bounds.bottom) list.scrollTop += target.bottom - bounds.bottom + 3;
   },[module?.id,query]);
   if (!module) return <Empty title="No modules found">The current graph has no identifiable modules.</Empty>;
-  const incoming = graph.edges.filter(edge=>edge.to === module.id);
-  const outgoing = graph.edges.filter(edge=>edge.from === module.id);
+  const incoming = graph.edges.filter(edge=>edge.to === module.id && nodes.has(edge.from));
+  const outgoing = graph.edges.filter(edge=>edge.from === module.id && nodes.has(edge.to));
   const matching = graph.nodes.filter(node=>node.label.toLowerCase().includes(query.trim().toLowerCase()));
-  const mapNodes = graph.nodes.length <= 24 ? graph.nodes : [module,...new Set([...incoming.map(edge=>nodes.get(edge.from)),
-    ...outgoing.map(edge=>nodes.get(edge.to))])].filter(Boolean).slice(0,24);
+  function chooseFromMap(id) {
+    if (id === module.id) return;
+    choosingFromMap.current = true;
+    onChoose(id);
+  }
   return <div className="arch-modules">
     <section className="arch-directory" aria-label="Module directory">
       <h3>Module directory <span className="arch-count">{graph.nodes.length}</span></h3>
@@ -177,29 +132,30 @@ function Modules({graph,active,onChoose,select}) {
     </section>
     <div className="arch-module-detail">
       <section className="arch-map" aria-label="Module relationships map">
-        <header className="arch-card-header"><div><h3>{graph.nodes.length <= 24 ? 'Dependency map' : 'Nearby modules'}</h3>
-          <p>{graph.nodes.length <= 24 ? 'Select a module to trace its connections.' : 'Showing up to 24 modules connected to your selection.'}</p></div>
-          <span className="arch-map-key"><i/> Selected</span>
-        </header>
-        <div className="arch-map-surface"><MapCanvas nodes={mapNodes} edges={graph.edges} focused={module.id} onChoose={onChoose}/></div>
+        <header className="arch-card-header"><div><h3>Dependency map</h3>
+          <p>Direct connections for the selected module. Select a neighbor to follow its dependencies.</p></div></header>
+        <div className="arch-map-surface">
+          <div className="arch-map-selection" ref={mapSelection} tabIndex={-1}>
+            <Box size={18} aria-hidden="true"/>
+            <div><span className="arch-kicker">Selected module</span><strong>{module.label}</strong></div>
+          </div>
+          <RelationshipList incoming edges={incoming} nodes={nodes} onChoose={chooseFromMap} select={select}/>
+          <RelationshipList edges={outgoing} nodes={nodes} onChoose={chooseFromMap} select={select}/>
+        </div>
       </section>
-      <section className="arch-module-summary" aria-label={module.label + ' details'}>
+      {(module.description || module.source || module.members?.length > 0) && <section className="arch-module-summary" aria-label={module.label + ' details'}>
         <header className="arch-card-header">
-          <div><span className="arch-kicker">Selected module</span><h3>{module.label}</h3>
+          <div><h3>About {module.label}</h3>
             {module.description && <p>{module.description}</p>}</div>
           {module.source && <button type="button" className="arch-control" onClick={event=>select(module,event)}><Code2 size={15} aria-hidden="true"/> Source</button>}
         </header>
-        <div className="arch-relation-grid">
-          <RelationshipList title="Used by" edges={incoming} nodes={nodes} select={select}/>
-          <RelationshipList title="Uses" edges={outgoing} nodes={nodes} select={select}/>
-        </div>
         {module.members?.length > 0 && <details className="arch-files" key={module.id}>
           <summary><FileCode2 size={16} aria-hidden="true"/> Relevant source files <span className="arch-count">{module.members.length}</span><ChevronDown size={15} aria-hidden="true"/></summary>
           <div>{module.members.map(member=><button type="button" className="arch-row" key={member.source.path}
             onClick={event=>select(member,event)}><FileCode2 size={15} aria-hidden="true"/><span><strong>{member.label}</strong>
               <small>{member.source.path}</small></span><ChevronRight size={14} aria-hidden="true"/></button>)}</div>
         </details>}
-      </section>
+      </section>}
     </div>
   </div>;
 }
@@ -226,13 +182,14 @@ function Lifecycle({flow,select}) {
   const byTransition = new Map(flow.edges.map(edge=>[JSON.stringify([edge.from,edge.to]),edge]));
   const mainEdges = new Set(main.slice(1).map((step,index)=>byTransition.get(JSON.stringify([main[index].id,step.id]))));
   const branches = flow.edges.filter(edge=>!mainEdges.has(edge) && nodes.has(edge.from) && nodes.has(edge.to));
+  const branchesBySource = Map.groupBy(branches,edge=>edge.from);
   const steps = expanded ? main : compactPath(flow,nodes);
   return <section className="arch-flow-card" aria-label={flow.label}>
     <header className="arch-card-header">
       <div><span className="arch-kicker">Main path</span><h3>{flow.label}</h3>
         <p>{main.length} stages{branches.length ? ' · ' + branches.length + ' alternate transitions' : ''}</p></div>
       <button type="button" className="arch-control" ref={expandControl} aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>
-        {expanded ? 'Collapse details' : 'Expand details'}<ChevronDown size={15} aria-hidden="true"/>
+        {expanded ? 'Collapse main path' : 'Expand main path'}<ChevronDown size={15} aria-hidden="true"/>
       </button>
     </header>
     <div className="arch-flow-body">
@@ -256,10 +213,17 @@ function Lifecycle({flow,select}) {
       </ol>
       {branches.length > 0 && <section className="arch-branches" aria-label="Alternate paths">
         <h4><GitBranch size={17} aria-hidden="true"/> Alternate paths <span className="arch-count">{branches.length}</span></h4>
-        {expanded ? branches.map(edge=><button type="button" className="arch-row" key={edgeKey(edge)}
-          onClick={event=>chooseEdge(edge,nodes,select,event)}><ArrowDownRight size={16} aria-hidden="true"/>
-          <span><strong>{nodes.get(edge.to).label}</strong><small>From {nodes.get(edge.from).label}</small></span><ChevronRight size={14} aria-hidden="true"/></button>)
-          : <p>Expand details to see where this workflow can branch.</p>}
+        {[...branchesBySource].map(([from,edges])=><div className="arch-branch-group" key={from}>
+          <h5>From {nodes.get(from).label}</h5>
+          <ul>{edges.map(edge=><li key={edgeKey(edge)}>
+            <button type="button" className="arch-row" onClick={event=>chooseEdge(edge,nodes,select,event)}>
+              <ArrowDownRight size={16} aria-hidden="true"/>
+              <span><strong>{nodes.get(edge.to).label}</strong>
+                <small>{displayRelation(edge.label)}{edge.inferred ? ' · Inferred' : ''}</small></span>
+              <ChevronRight size={14} aria-hidden="true"/>
+            </button>
+          </li>)}</ul>
+        </div>)}
       </section>}
     </div>
   </section>;

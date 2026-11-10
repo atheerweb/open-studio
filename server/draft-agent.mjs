@@ -3,6 +3,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { atomicWrite, bridgeTag, editableFile, safeFile } from './draft-publish.mjs';
 import { runCodexSession } from './codex.mjs';
+import { resolveScript, scriptExtension, scriptStatements } from './project-framework.mjs';
 
 function addMessage(draft,author,text,route,question,activity) {
   draft.messages.push({author,text:text.slice(0,16000),route,...(question && {question}),
@@ -103,10 +104,17 @@ async function prepareEdits(draft,edits) {
   return {edits:prepared,blockedFiles:[...blocked].map(([file,reason]) => ({file,reason}))};
 }
 
-async function vueDependencies(draft) {
+async function componentDependencies(draft) {
   const dependencies = new Map();
+  const known = new Set(draft.files);
   for (const file of draft.files) {
     const source = await rawFile(draft,file);
+    if (draft.framework === 'react') {
+      const imports = scriptStatements(file,source).filter(node => node.type === 'ImportDeclaration' && node.importKind !== 'type')
+        .map(node => resolveScript(file,node.source.value,known)).filter(Boolean);
+      dependencies.set(file,imports);
+      continue;
+    }
     const imports = [];
     for (const [,specifier] of source?.matchAll(/['"]((?:@\/|\.\.?\/)[^'"\r\n]+\.vue)['"]/g) || []) {
       imports.push(specifier.startsWith('@/') ? 'src/' + specifier.slice(2)
@@ -130,14 +138,14 @@ function componentReferences(pages,dependencies,target) {
 }
 
 export async function componentUsage(draft,file) {
-  const {routes,files} = componentReferences(draft.routes,await vueDependencies(draft),file);
+  const {routes,files} = componentReferences(draft.routes,await componentDependencies(draft),file);
   return {pages:routes.length,files:files.filter(reference => reference !== file).length};
 }
 
 async function sharedImpacts(draft,edits,selected) {
-  const dependencies = await vueDependencies(draft);
+  const dependencies = await componentDependencies(draft);
   return edits.flatMap(({file}) => {
-    if (!file.endsWith('.vue')) return [];
+    if (!(draft.framework === 'react' ? scriptExtension.test(file) : file.endsWith('.vue'))) return [];
     const {routes,files} = componentReferences(draft.routes,dependencies,file);
     const page = draft.routes.some(record => record.file === file);
     return routes.length > 1 || (!page && (files.length || file === selected || /(?:^|\/)components\//i.test(file)))

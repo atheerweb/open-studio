@@ -67,8 +67,27 @@ async function localCommitChanges(root,{branch,upstreamRef},remotes) {
 }
 
 async function branchRefs(root) {
-  const refs = await git(root,'for-each-ref','--format=%(refname)%00%(symref)',localBranchPrefix,remoteBranchPrefix);
-  return refs.split('\n').map(line=>line.split('\0')).filter(([ref,target])=>ref && !target).map(([ref])=>ref);
+  const refs = await git(root,'for-each-ref','--format=%(refname)%00%(symref)%00%(committerdate:iso-strict)',
+    localBranchPrefix,remoteBranchPrefix);
+  return refs.split('\n').map(line=>line.split('\0')).filter(([ref,target])=>ref && !target)
+    .map(([name,,updatedAt])=>({name,updatedAt}));
+}
+
+async function readGitGraph(root,head,refs) {
+  if (!head && !refs.length) return [];
+  const log = await git(root,'log','--graph','--date-order','--max-count=40','--no-color','--decorate=short',
+    '--decorate-refs=HEAD','--decorate-refs=refs/heads/*','--decorate-refs=refs/remotes/*',
+    '--format=%x00%H%x00%h%x00%D%x00%s','--branches','--remotes',...(head ? ['HEAD'] : []),'--');
+  return log.split('\n').filter(Boolean).map(line=>{
+    const [lanes,hash,shortHash,refs,subject] = line.split('\0');
+    return hash ? {lanes:lanes.trimEnd(),hash,shortHash,refs,subject} : {lanes:lanes.trimEnd()};
+  });
+}
+
+async function countIncomingCommits(root,head,upstreamRef) {
+  if (!head || !upstreamRef) return null;
+  const tip = await optionalGitRef(root,'rev-parse','--verify','--quiet',upstreamRef);
+  return tip ? Number(await git(root,'rev-list','--count',head + '..' + tip,'--')) : null;
 }
 
 export async function gitWorkspace(source) {
@@ -81,21 +100,34 @@ export async function gitWorkspace(source) {
     : {result:{available:false,...(available === null && {reason:'Git is unavailable.'})}};
 }
 
-export async function readGitWorkspace(source) {
+export async function readGitWorkspace(source,{fetchRemotes = false} = {}) {
   const {root,result} = await gitWorkspace(source);
   if (!root) return result;
-  const [diff,info,remoteNames,refs,mergeHead] = await Promise.all([
-    readGitDiff(root),branchInfo(root),git(root,'remote'),branchRefs(root),
+  const remotes = (await git(root,'remote')).split('\n').filter(Boolean);
+  let fetchError;
+  if (fetchRemotes && remotes.length) {
+    await git(root,'fetch','--all','--prune','--no-prune-tags','--no-tags','--no-recurse-submodules','--no-write-fetch-head')
+      .catch(error=>{fetchError = error.message;});
+  }
+  const [diff,info,refs,head,mergeHead] = await Promise.all([
+    readGitDiff(root),branchInfo(root),branchRefs(root),
+    optionalGitRef(root,'rev-parse','--verify','--quiet','HEAD'),
     optionalGitRef(root,'rev-parse','--verify','--quiet','MERGE_HEAD')
   ]);
   const {branch,upstream,remote,ref} = info;
-  const remotes = remoteNames.split('\n').filter(Boolean);
+  const remoteRefs = refs.filter(({name})=>name.startsWith(remoteBranchPrefix));
   const branches = {
-    local:refs.filter(name=>name.startsWith(localBranchPrefix)).map(name=>name.slice(localBranchPrefix.length)),
-    remote:refs.filter(name=>name.startsWith(remoteBranchPrefix)).map(name=>name.slice(remoteBranchPrefix.length))
+    local:refs.filter(({name})=>name.startsWith(localBranchPrefix)).map(({name})=>name.slice(localBranchPrefix.length)),
+    remote:remoteRefs.map(({name})=>name.slice(remoteBranchPrefix.length))
   };
-  return {...diff,...await localCommitChanges(root,info,remotes),branch,upstream,branches,
-    canPull:Boolean(remote && ref),canMerge:Boolean(branch && (remote && ref ? remote !== '.' : defaultRemote(remotes))),
+  const canPull = Boolean(remote && ref);
+  const [localChanges,graph,incomingCommits] = await Promise.all([
+    localCommitChanges(root,info,remotes),readGitGraph(root,head,refs),
+    countIncomingCommits(root,head,canPull ? info.upstreamRef : '')
+  ]);
+  const remoteBranchUpdatedAt = Object.fromEntries(remoteRefs.map(({name,updatedAt})=>[name.slice(remoteBranchPrefix.length),updatedAt]));
+  return {...diff,...localChanges,branch,upstream,branches,remoteBranchUpdatedAt,graph,incomingCommits,
+    ...(fetchError && {fetchError}),canPull,canMerge:Boolean(branch && (remote && ref ? remote !== '.' : defaultRemote(remotes))),
     mergeInProgress:Boolean(mergeHead),hasRemote:remotes.length > 0};
 }
 
@@ -151,7 +183,7 @@ export async function changeGitWorkspace(source,{action,group,path,message,branc
   const {root} = await gitWorkspace(source);
   if (!root) throw fail('Open a Git working tree first.');
   if (action === 'git-switch') {
-    if (typeof targetRef !== 'string' || !(await branchRefs(root)).includes(targetRef)) {
+    if (typeof targetRef !== 'string' || !(await branchRefs(root)).some(({name})=>name === targetRef)) {
       throw fail('Choose an existing branch.');
     }
     if (targetRef.startsWith(localBranchPrefix)) {
