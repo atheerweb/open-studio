@@ -31,7 +31,7 @@ test('desktop server opens a local Vue workspace and stops listening on quit', a
   }
 });
 
-test('frontend and backend windows keep separate projects open', async () => {
+test('a linked backend supplies Architecture for the open frontend workspace', async () => {
   const {startDesktopServer} = await import('../desktop/server.mjs');
   const root = await mkdtemp(join(tmpdir(),'open-studio-full-stack-'));
   const frontend = join(root,'frontend');
@@ -54,18 +54,26 @@ test('frontend and backend windows keep separate projects open', async () => {
     await mkdir(backend);
     await writeFile(join(backend,'composer.json'),JSON.stringify({require:{'laravel/framework':'*'}}));
     await writeFile(join(backend,'artisan'),'<?php');
+    await call('link-backend',{folder:backend},409);
     await call('open',{folder:frontend});
-    await call('open',{workspace:'backend',folder:frontend},409);
-    const opened = await call('open',{workspace:'backend',folder:backend});
-    assert.equal(opened.workspace.name,'backend');
-    assert.equal(opened.workspace.architecture,true);
-    await call('architecture-status',{workspace:'backend'});
     await call('architecture-status',{},409);
-    assert.equal((await call('status')).workspace.canPreview,true);
+    await call('link-backend',{folder:frontend},400);
+    const linked = (await call('link-backend',{folder:backend})).workspace;
+    assert.equal(linked.name,'frontend');
+    assert.equal(linked.canPreview,true);
+    assert.equal(linked.backend.name,'backend');
+    assert.equal(linked.architecture,true);
+    await call('architecture-status');
     assert.equal((await call('read',{file:'src/App.vue'})).text,'<template>Frontend</template>');
-    await call('close',{workspace:'backend'});
-    assert.equal((await call('status',{workspace:'backend'})).workspace,null);
-    assert.equal((await call('status')).workspace.name,'frontend');
+    await call('link-backend',{folder:frontend},400);
+    assert.equal((await call('status')).workspace.backend.name,'backend');
+    assert.equal((await call('unlink-backend')).workspace.backend,undefined);
+    await call('architecture-status',{},409);
+    await call('link-backend',{folder:backend});
+    await call('close');
+    const reopened = (await call('open',{folder:frontend})).workspace;
+    assert.equal(reopened.backend,undefined);
+    await call('architecture-status',{},409);
   } finally {
     await desktop.stop();
     await rm(root,{recursive:true,force:true});

@@ -332,6 +332,7 @@ function EmptyPreview({onImport, workspace, onStart, port, onPortChange, busy}) 
       <h1>{workspace ? (canPreview ? 'Your project is ready to run' : workspace.name) : 'Open a project folder'}</h1>
       <p>{workspace ? (canPreview ? 'Start the dev server to browse your app and give Codex the context of the page you are viewing.'
         : 'Open Source Control to review and commit changes. Live preview is available for Vue projects that use Vite.')
+        : isBackend ? 'Open a Laravel project to explore its modules, business lifecycles, and system design.'
         : 'Edit and preview your Vue project locally, then review, commit, and push with Source Control.'}</p>
       {canPreview && <form className="preview-start" onSubmit={onStart}>
         <label htmlFor="preview-port">Preview port
