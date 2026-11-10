@@ -12,6 +12,9 @@ import {SkillPrompt} from './skill-prompt.jsx';
 import {Select} from './select.jsx';
 
 const SourceEditor = lazy(() => import('./source-editor.jsx'));
+const workspaceRole = window.location.hash === '#backend' ? 'backend' : 'frontend';
+const isBackend = workspaceRole === 'backend';
+document.title = 'Open Studio — ' + (isBackend ? 'Backend' : 'Frontend');
 
 const gitGroups = [['staged','Staged Changes'],['unstaged','Changes'],['untracked','Untracked'],['committed','Local Commit Changes']];
 const gitStatusNames = {A:'Added',M:'Modified',D:'Deleted',R:'Renamed',C:'Copied',T:'Type changed',U:'Conflict','?':'Untracked'};
@@ -210,7 +213,7 @@ function GitPatch({result,selected,content}) {
 async function api(action, values = {}) {
   const response = await fetch('/api/vue',{
     method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action,...values})
+    body:JSON.stringify({action,...values,workspace:workspaceRole})
   });
   const result = await response.json();
   if (!response.ok) throw Object.assign(new Error(result.error || 'The workspace request failed.'),{committed:result.committed});
@@ -401,7 +404,7 @@ function App() {
   const [workspace,setWorkspace] = useState(null);
   const [folder,setFolder] = useState('');
   const [importOpen,setImportOpen] = useState(false);
-  const [port,setPort] = useState('5174');
+  const [port,setPort] = useState(isBackend ? '5175' : '5174');
   const [busy,setBusy] = useState('');
   const [agentTurn,setAgentTurn] = useState(null);
   const [previewProgress,setPreviewProgress] = useState(null);
@@ -475,7 +478,13 @@ function App() {
     : !consent ? 'Enable sharing below to send.' : '';
 
   useEffect(() => {
-    api('status').then(result => setWorkspace(result.workspace)).catch(error => setNotice({error:true,text:error.message}));
+    api('status').then(({workspace:opened})=>{
+      setWorkspace(opened);
+      if (opened?.architecture && !opened.canPreview) {
+        setTab('Architecture');
+        setAgentOpen(false);
+      }
+    }).catch(error => setNotice({error:true,text:error.message}));
   },[]);
   useEffect(() => {
     if (busy !== 'Starting Vite preview…') return;
@@ -626,7 +635,9 @@ function App() {
     perform('Opening folder…',async () => {
       const {workspace:opened} = await api('open',{folder});
       setWorkspace(opened);
-      setTab(opened.architecture && !opened.canPreview ? 'Architecture' : 'Preview');
+      const showArchitecture = opened.architecture && !opened.canPreview;
+      setTab(showArchitecture ? 'Architecture' : 'Preview');
+      if (showArchitecture) setAgentOpen(false);
       setFolder('');
       setImportOpen(false);
       setNotice({text:'Project opened.'});
@@ -891,9 +902,13 @@ function App() {
         <span>Open Studio</span>
       </div>
       <div className="workspace-path">
-        <span className="workspace-label">LOCAL</span><span title={workspace?.name}>{workspace?.name || 'Workspace'}</span>
+        <span className="workspace-label">{isBackend ? 'BACKEND' : 'FRONTEND'}</span><span title={workspace?.name}>{workspace?.name || 'Workspace'}</span>
       </div>
       <div className="top-right">
+        <a className="workspace-window" href={isBackend ? '/' : '/#backend'} target="_blank" rel="noopener"
+          aria-label={isBackend ? 'Open Frontend in another window' : 'Open Backend in another window'}>
+          <span>{isBackend ? 'Open Frontend' : 'Open Backend'}</span><ArrowUpRight size={14} aria-hidden="true"/>
+        </a>
         <div className="panel-controls" role="group" aria-label="Workspace panels">
           <button type="button" className="panel-toggle" aria-label="Agent Chat" aria-controls="agent-chat"
             aria-expanded={agentOpen} onClick={()=>setAgentOpen(open=>!open)}>
@@ -1182,8 +1197,8 @@ function App() {
     <dialog ref={dialog} onCancel={event=>busy ? event.preventDefault() : setImportOpen(false)}>
       <form onSubmit={importProject}>
         <div className="dialog-title"><div className="project-icon"><FolderOpen size={20}/></div><button type="button" className="icon" aria-label="Close folder dialog" onClick={()=>setImportOpen(false)} disabled={!!busy}><X size={19}/></button></div>
-        <h2>Open a project folder</h2><p>Choose the original local project folder. Vue preview requires a Vite project with installed dependencies.</p>
-        <label htmlFor="folder">Frontend folder</label>
+        <h2>Open {isBackend ? 'a backend' : 'a frontend'} folder</h2><p>Laravel projects open in Architecture, and Vue projects can run a Vite preview.</p>
+        <label htmlFor="folder">Project folder</label>
         <button id="folder" className="quiet" type="button" autoFocus aria-describedby="selected-folder" onClick={browseForFolder} disabled={!!busy}>
           <FolderOpen size={16}/>{busy === 'Choosing folder…' ? busy : 'Choose folder'}
         </button>

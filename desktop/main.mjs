@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { startDesktopServer } from './server.mjs';
 
 function runDesktop() {
-  let window;
+  const windows = new Map();
   let studio;
   let shuttingDown = false;
   let stopped = false;
@@ -12,19 +12,33 @@ function runDesktop() {
   const startup = app.whenReady().then(async () => {
     studio = await startDesktopServer({
       store:process.env.OPEN_STUDIO_DRAFTS_DIR || join(homedir(),'.open-studio','drafts'),
-      pickFolder:async () => {
+      pickFolder:async workspace => {
+        const window = windows.get(workspace);
         if (!window || window.isDestroyed()) return null;
         const result = await dialog.showOpenDialog(window,{title:'Choose a local project folder',properties:['openDirectory']});
         return result.canceled ? null : result.filePaths[0];
       }
     });
-    if (shuttingDown) return;
+    if (!shuttingDown) await openWorkspace('frontend');
+  });
 
-    window = new BrowserWindow({
-      title:'Open Studio', width:1440, height:900, minWidth:860, minHeight:580,
+  async function openWorkspace(workspace) {
+    if (shuttingDown) return;
+    const existing = windows.get(workspace);
+    if (existing) {
+      if (existing.isMinimized()) existing.restore();
+      if (existing.isVisible()) existing.focus();
+      return;
+    }
+
+    const window = new BrowserWindow({
+      title:workspace === 'backend' ? 'Open Studio — Backend' : 'Open Studio — Frontend',
+      width:1440, height:900, minWidth:680, minHeight:580,
       backgroundColor:'#191917', show:false,
       webPreferences:{nodeIntegration:false, contextIsolation:true, sandbox:true}
     });
+    windows.set(workspace,window);
+    window.once('closed',() => windows.delete(workspace));
     const {webContents} = window;
     webContents.session.setPermissionRequestHandler((_contents,_permission,respond) => respond(false));
     webContents.session.setPermissionCheckHandler(() => false);
@@ -33,17 +47,24 @@ function runDesktop() {
       if (event.isMainFrame) event.preventDefault();
     });
     webContents.setWindowOpenHandler(({url}) => {
-      if (['http:','https:'].includes(new URL(url).protocol)) void shell.openExternal(url).catch(console.error);
+      if (url === studio.url || url === studio.url + '#backend') {
+        void openWorkspace(url === studio.url ? 'frontend' : 'backend').catch(console.error);
+      } else if (['http:','https:'].includes(new URL(url).protocol)) {
+        void shell.openExternal(url).catch(console.error);
+      }
       return {action:'deny'};
     });
-    await window.loadURL(studio.url);
-    if (!shuttingDown) window.show();
-  });
+    try {
+      await window.loadURL(workspace === 'backend' ? studio.url + '#backend' : studio.url);
+      if (!shuttingDown && !window.isDestroyed()) window.show();
+    } catch (failure) {
+      if (!window.isDestroyed()) window.destroy();
+      throw failure;
+    }
+  }
 
   app.on('second-instance',() => {
-    if (!window || window.isDestroyed() || shuttingDown) return;
-    if (window.isMinimized()) window.restore();
-    window.focus();
+    if (studio) void openWorkspace(windows.has('frontend') || !windows.has('backend') ? 'frontend' : 'backend').catch(console.error);
   });
   app.on('window-all-closed',() => app.quit());
   app.on('before-quit',event => {

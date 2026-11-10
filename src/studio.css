@@ -56,6 +56,20 @@
   font: 650 10px/1.4 var(--font-code);
   letter-spacing: .07em;
 }
+.workspace-window {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding-inline: 6px;
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.workspace-window:hover { background: var(--soft); color: var(--accent); }
 .statusbar i {
   display: inline-block;
   flex: none;

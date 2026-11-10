@@ -77,11 +77,9 @@ function chatExcerpt(text = '',limit) {
 }
 
 export function createStudio({ask = askCodex, runAgent, store, serveDevelopment, pickFolder = chooseFrontendFolder, listSkills = listCodexSkills} = {}) {
-  let draft;
-  let architecture;
-  let activeOperation;
+  const workspaces = new Map([['frontend',{}],['backend',{}]]);
   let closing = false;
-  const summary = () => draft ? {
+  const summary = ({draft,architecture}) => draft ? {
     name:draft.name,files:draft.files,state:draft.state,url:draft.url,logs:draft.logs,
     live:!!draft.live,canPreview:draft.live ? draft.canPreview : true,
     ...(architecture && {architecture:true}),
@@ -136,10 +134,15 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
     if (request.method !== 'POST' || request.url !== '/api/vue') return send(404,{error:'Route not found.'});
     if (request.headers.origin !== 'http://' + host) return send(403,{error:'Invalid origin.'});
     if (request.headers['content-type'] !== 'application/json') return send(415,{error:'Use a JSON request.'});
+    let workspace;
     let finishOperation;
     try {
       const input = await readRequest(request);
-      if (input?.action === 'status') return send(200,{workspace:summary()});
+      const workspaceRole = input?.workspace === undefined ? 'frontend' : input.workspace;
+      workspace = workspaces.get(workspaceRole);
+      if (!workspace) throw error(400,'Choose the frontend or backend workspace.');
+      const {draft,architecture,activeOperation} = workspace;
+      if (input?.action === 'status') return send(200,{workspace:summary(workspace)});
       if (input?.action === 'agent-skills') return send(200,{skills:await listSkills(draft?.directory || process.cwd())});
       if (input?.action === 'resolve') {
         const route = normalizeRoute(input.route);
@@ -183,15 +186,25 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
         }
       } else {
         const done = new Promise(resolve => { finishOperation = resolve; });
-        activeOperation = {action:input?.action,done};
+        workspace.activeOperation = {action:input?.action,done};
       }
       if (input?.action === 'pick-folder') {
-        return send(200,{folder:await pickFolder()});
+        return send(200,{folder:await pickFolder(workspaceRole)});
       }
       if (['open','import'].includes(input?.action)) {
         if (draft) throw error(409,'Close the current project before opening another folder.');
-        draft = await (input.action === 'open' ? LiveWorkspace : VueDraft).open(input.folder,store);
-        if (draft.live) architecture = await openArchitecture(draft.source,store);
+        if (input.action === 'import' && workspaceRole === 'backend') throw error(400,'Import Vue drafts in the frontend workspace.');
+        const opened = await (input.action === 'open' ? LiveWorkspace : VueDraft).open(input.folder,store);
+        if (opened.live && [...workspaces.values()].some(({draft}) => draft?.live && draft.source === opened.source)) {
+          throw error(409,'This folder is already open in the other workspace.');
+        }
+        workspace.draft = opened;
+        try {
+          if (opened.live) workspace.architecture = await openArchitecture(opened.source,store);
+        } catch (failure) {
+          workspace.draft = undefined;
+          throw failure;
+        }
       } else {
         if (!draft) throw error(409,'Import a Vue folder first.');
         switch (input?.action) {
@@ -311,27 +324,29 @@ export function createStudio({ask = askCodex, runAgent, store, serveDevelopment,
           case 'close':
             await draft.close();
             await architecture?.close();
-            architecture = undefined;
-            draft = undefined;
+            workspace.architecture = undefined;
+            workspace.draft = undefined;
             break;
           default: throw error(400,'Unknown workspace action.');
         }
       }
-      return send(200,{workspace:summary()});
+      return send(200,{workspace:summary(workspace)});
     } catch (failure) {
       return send(failure.status || 422,{error:failure.message,...(failure.committed && {committed:true})});
     } finally {
       if (finishOperation) {
-        activeOperation = undefined;
+        workspace.activeOperation = undefined;
         finishOperation();
       }
     }
   });
   server.closeWorkspace = async () => {
     closing = true;
-    await activeOperation?.done;
-    await architecture?.close();
-    await draft?.close();
+    await Promise.all([...workspaces.values()].map(async workspace => {
+      await workspace.activeOperation?.done;
+      try { await workspace.architecture?.close(); }
+      finally { await workspace.draft?.close(); }
+    }));
   };
   return server;
 }

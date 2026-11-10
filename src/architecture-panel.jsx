@@ -3,6 +3,7 @@ import {
   ArrowDown, ArrowDownRight, ArrowRight, Box, Check, ChevronDown, ChevronRight, CircleAlert, Code2, Copy, Database,
   FileCode2, GitBranch, Layers, Network, RefreshCw, Search, Server, Settings2, Terminal, Workflow, X
 } from 'lucide-react';
+import {Select} from './select.jsx';
 import './architecture.css';
 
 const views = [
@@ -26,7 +27,9 @@ function Empty({Icon = Network,title,children}) {
 function Evidence({item,api,onClose}) {
   const [result,setResult] = useState(null);
   const [error,setError] = useState('');
+  const close = useRef(null);
   const {path,line} = item.source || {};
+  useEffect(()=>{close.current?.focus();},[]);
   useEffect(()=>{
     if (!path) return;
     let active = true;
@@ -40,7 +43,7 @@ function Evidence({item,api,onClose}) {
   return <aside className="arch-evidence" aria-label="Source evidence">
     <header className="arch-evidence-header">
       <h3><Code2 size={16} aria-hidden="true"/> Source evidence</h3>
-      <button type="button" className="arch-icon" aria-label="Close source evidence" onClick={onClose}><X size={17} aria-hidden="true"/></button>
+      <button type="button" className="arch-icon" ref={close} aria-label="Close source evidence" onClick={onClose}><X size={17} aria-hidden="true"/></button>
     </header>
     <div className="arch-evidence-body">
       <strong>{item.label}</strong>
@@ -61,7 +64,7 @@ function chooseEdge(edge,nodes,select,event) {
     description:displayRelation(edge.label)},event);
 }
 
-function RelationshipList({title,edges,nodes,module,select}) {
+function RelationshipList({title,edges,nodes,select}) {
   const incoming = title === 'Used by';
   const Icon = incoming ? ArrowDownRight : ArrowRight;
   return <section className="arch-relations" aria-label={title}>
@@ -83,11 +86,11 @@ function MapCanvas({nodes,edges,focused,onChoose}) {
   const columns = nodes.length > 12 ? 4 : nodes.length > 4 ? 3 : 2;
   const rows = Math.ceil(nodes.length / columns);
   const width = 800;
-  const height = Math.max(174,rows * 70 + 26);
+  const height = Math.max(164,rows * 58 + 26);
   const stepX = width / columns;
-  const boxWidth = Math.min(164,stepX - 32);
+  const boxWidth = Math.min(172,stepX - 30);
   const position = new Map(nodes.map((node,index)=>[
-    node.id,{x:(index % columns + .5) * stepX,y:48 + Math.floor(index / columns) * 70}
+    node.id,{x:(index % columns + .5) * stepX,y:42 + Math.floor(index / columns) * 58}
   ]));
   const links = edges.filter(edge=>position.has(edge.from) && position.has(edge.to));
   const ordered = [...links.filter(edge=>edge.from !== focused && edge.to !== focused),
@@ -114,8 +117,11 @@ function MapCanvas({nodes,edges,focused,onChoose}) {
     {nodes.map(node=>{
       const {x,y} = position.get(node.id);
       const active = node.id === focused;
-      const limit = Math.floor((boxWidth - 34) / 7.2);
-      const text = node.label.length > limit ? node.label.slice(0,limit - 1) + '…' : node.label;
+      const limit = Math.floor((boxWidth - 34) / 7);
+      const split = node.label.length > limit ? node.label.lastIndexOf(' ',limit) : -1;
+      const first = split > 0 ? node.label.slice(0,split) : node.label;
+      const second = split > 0 ? node.label.slice(split + 1) : '';
+      const truncate = text=>text.length > limit ? text.slice(0,limit - 1) + '…' : text;
       return <g key={node.id} role="button" tabIndex={0} aria-label={node.label} aria-pressed={active}
         className="arch-map-node" data-active={active} transform={'translate(' + x + ' ' + y + ')'}
         onClick={()=>onChoose(node.id)} onKeyDown={event=>{
@@ -127,7 +133,8 @@ function MapCanvas({nodes,edges,focused,onChoose}) {
         <title>{node.label}</title>
         <rect x={-boxWidth / 2} y="-19" width={boxWidth} height="38" rx="7"/>
         <rect className="arch-map-glyph" x={-boxWidth / 2 + 11} y="-4" width="8" height="8" rx="2"/>
-        <text x={-boxWidth / 2 + 27} y="4">{text}</text>
+        <text x={-boxWidth / 2 + 27} y={second ? -2 : 4}>{truncate(first)}</text>
+        {second && <text x={-boxWidth / 2 + 27} y="13">{truncate(second)}</text>}
       </g>;
     })}
   </svg>;
@@ -135,8 +142,19 @@ function MapCanvas({nodes,edges,focused,onChoose}) {
 
 function Modules({graph,active,onChoose,select}) {
   const [query,setQuery] = useState('');
+  const directory = useRef(null);
+  const selectedButton = useRef(null);
   const nodes = new Map(graph.nodes.map(node=>[node.id,node]));
   const module = nodes.get(active) || graph.nodes.find(node=>node.id === 'Lawsuit') || graph.nodes[0];
+  useEffect(()=>{
+    const list = directory.current;
+    const button = selectedButton.current;
+    if (!list || !button) return;
+    const bounds = list.getBoundingClientRect();
+    const target = button.getBoundingClientRect();
+    if (target.top < bounds.top) list.scrollTop += target.top - bounds.top - 3;
+    else if (target.bottom > bounds.bottom) list.scrollTop += target.bottom - bounds.bottom + 3;
+  },[module?.id,query]);
   if (!module) return <Empty title="No modules found">The current graph has no identifiable modules.</Empty>;
   const incoming = graph.edges.filter(edge=>edge.to === module.id);
   const outgoing = graph.edges.filter(edge=>edge.from === module.id);
@@ -150,9 +168,10 @@ function Modules({graph,active,onChoose,select}) {
         <Search size={16} aria-hidden="true"/>
         <input type="search" aria-label="Find a module" placeholder="Find a module…" value={query} onChange={event=>setQuery(event.target.value)}/>
       </label>
-      <div className="arch-directory-list">
+      <div className="arch-directory-list" ref={directory}>
         {matching.map(node=><button type="button" className="arch-directory-item" key={node.id} aria-pressed={module.id === node.id}
-          onClick={()=>onChoose(node.id)}><Box size={15} aria-hidden="true"/><span>{node.label}</span><ChevronRight size={14} aria-hidden="true"/></button>)}
+          ref={module.id === node.id ? selectedButton : null} onClick={()=>onChoose(node.id)}>
+          <Box size={15} aria-hidden="true"/><span>{node.label}</span><ChevronRight size={14} aria-hidden="true"/></button>)}
         {!matching.length && <p className="arch-no-results">No modules match “{query}”.</p>}
       </div>
     </section>
@@ -252,9 +271,9 @@ function Lifecycles({flows,active,onChoose,select}) {
   return <div className="arch-lifecycles">
     <div className="arch-flow-picker">
       <label>Business lifecycle
-        <select value={flow.id} onChange={event=>onChoose(event.target.value)}>
+        <Select value={flow.id} onChange={event=>onChoose(event.target.value)}>
           {flows.map(item=><option value={item.id} key={item.id}>{item.label}</option>)}
-        </select>
+        </Select>
       </label>
       <span className="arch-tag">{flow.kind}</span>
     </div>
@@ -325,7 +344,7 @@ function Settings({result,terminal,pending,connectTerminal,toggleAI}) {
       </button></div>}
       {result.terminal && <div className="arch-settings-row"><div>
         <h3>PowerShell integration</h3><p>Refresh after successful pulls and pushes from a connected session.</p>
-      </div><button type="button" className="arch-control" disabled={!!pending} onClick={connectTerminal}>
+      </div><button type="button" className="arch-control" disabled={!!pending} onClick={()=>{setCopyMessage('');connectTerminal();}}>
         <Terminal size={15} aria-hidden="true"/>{terminal ? 'Hide command' : 'Connect PowerShell'}
       </button></div>}
       {terminal && <div className="arch-terminal">
@@ -341,7 +360,7 @@ function Settings({result,terminal,pending,connectTerminal,toggleAI}) {
 
 export function ArchitecturePanel({api,hidden,projectName}) {
   const [result,setResult] = useState(null);
-  const [failure,setFailure] = useState('');
+  const [failure,setFailure] = useState(null);
   const [pending,setPending] = useState('');
   const [view,setView] = useState('modules');
   const [moduleId,setModuleId] = useState('');
@@ -362,7 +381,7 @@ export function ArchitecturePanel({api,hidden,projectName}) {
           const status = await api('architecture-status');
           if (active && version === request.current) {
             setResult(status);
-            setFailure(previous=>previous?.scope === 'status' ? '' : previous);
+            setFailure(previous=>previous?.scope === 'status' ? null : previous);
           }
         }
       } catch (error) {
@@ -380,7 +399,7 @@ export function ArchitecturePanel({api,hidden,projectName}) {
     action.current = true;
     request.current++;
     setPending(name);
-    setFailure('');
+    setFailure(null);
     try {await task();}
     catch (error) {setFailure({scope:'action',message:error.message});}
     finally {action.current = false;setPending('');}
@@ -409,6 +428,7 @@ export function ArchitecturePanel({api,hidden,projectName}) {
   const graph = result?.graph;
   const waiting = pending === 'refresh' || (!result && !failure) || ['generating','updating'].includes(result?.state);
   const issue = failure?.message || result?.message;
+  const notice = issue || result?.warning || (result?.importedStale && 'The imported graph could not be matched to the current source.');
   const outdated = !!graph && (!!result?.importedStale || result?.state === 'failed');
   const StatusIcon = waiting ? RefreshCw : outdated || issue ? CircleAlert : Check;
   const status = waiting ? (graph ? 'Updating diagrams' : 'Analyzing source') :
@@ -430,10 +450,10 @@ export function ArchitecturePanel({api,hidden,projectName}) {
     </header>
     <div className="arch-meta">
       <span>{graph?.analyzer || 'Project source'}{graph && ' · ' + graph.modules.edges.length + ' module relationships'}</span>
-      <Settings key={terminal ? 'connected' : 'settings'} result={result} terminal={terminal} pending={pending} connectTerminal={connectTerminal} toggleAI={toggleAI}/>
+      <Settings result={result} terminal={terminal} pending={pending} connectTerminal={connectTerminal} toggleAI={toggleAI}/>
     </div>
-    {(issue || result?.warning) && <p className="arch-notice" role={issue ? 'alert' : 'status'}>
-      <CircleAlert size={16} aria-hidden="true"/>{issue || result.warning}
+    {notice && <p className="arch-notice" role={issue ? 'alert' : 'status'}>
+      <CircleAlert size={16} aria-hidden="true"/>{notice}
     </p>}
     {graph ? <>
       <nav className="arch-tabs" aria-label="Architecture views">
